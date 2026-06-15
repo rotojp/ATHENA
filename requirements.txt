@@ -1,0 +1,12 @@
+# Runtime dependencies of `athena_r1` (mirrors pyproject.toml).
+# Use this if you can't / don't want to do `pip install -e .`
+#
+# For local model serving:  add `vllm>=0.6`
+# For web servers (AG-UI / OpenAI-compat):  see pyproject [web] extra
+
+openai>=1.0
+transformers>=4.40
+tooluniverse>=0.3
+jinja2
+numpy
+torch>=2.0

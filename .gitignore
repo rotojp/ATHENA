@@ -1,0 +1,41 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+ENV/
+.env
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Model artifacts
+*.pt
+*.bin
+*.safetensors
+*.gguf
+checkpoints/
+models/
+
+# Logs
+*.log
+logs/
+training_logs/
+
+# Benchmark artifacts (resumable run state — machine-specific + multi-MB)
+tests/reproducibility_full.jsonl
+*_progress.jsonl
+*_results.jsonl

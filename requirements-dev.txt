@@ -1,0 +1,18 @@
+# Development dependencies for ATHENA-R1. Use this on top of `requirements.txt`:
+#   pip install -r requirements.txt -r requirements-dev.txt
+
+# Test runner
+pytest>=8.0
+pytest-timeout>=2.0
+
+# Lint + format
+ruff>=0.7
+
+# Optional: static type-checking
+mypy>=1.10
+
+# Optional: pre-commit hook runner
+pre-commit>=4.0
+
+# For the eval/repro test that hits the live OpenAI-compat server
+requests>=2.31

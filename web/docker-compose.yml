@@ -1,0 +1,44 @@
+# One-command deployment: ATHENA-R1 OpenAI-compat server + Open WebUI
+#
+# Prerequisites (NOT in this compose — too heavy):
+#   1. vLLM serving ATHENA-R1 on host port 8000
+#   2. ToolUniverse HTTP server on host port 8080
+#
+# Bring it up:
+#   docker compose up -d
+#
+# Then open http://localhost:3000 — pick "athena-r1" in the model dropdown.
+
+services:
+  athena-r1-server:
+    build:
+      context: ..
+      dockerfile: web/deploy/Dockerfile
+    container_name: athena-r1-server
+    network_mode: host           # access host vLLM (:8000) + TU (:8080)
+    environment:
+      VLLM_URL: http://0.0.0.0:8000/v1
+      TOOLUNIVERSE_API: http://0.0.0.0:8080
+      ATHENA_MODEL_PATH: mims-harvard/ATHENA-R1-Qwen3-8B
+      PORT: "9000"
+    restart: unless-stopped
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: athena-r1-webui
+    ports:
+      - "3000:8080"
+    environment:
+      OPENAI_API_BASE_URL: http://host.docker.internal:9000/v1
+      OPENAI_API_KEY: anything   # required by Open WebUI but unused by us
+      WEBUI_AUTH: "false"        # disable auth for quickstart; enable in prod
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - open-webui-data:/app/backend/data
+    depends_on:
+      - athena-r1-server
+    restart: unless-stopped
+
+volumes:
+  open-webui-data:

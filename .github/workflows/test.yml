@@ -1,0 +1,98 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install ruff
+        run: pip install ruff
+      - name: Ruff check
+        run: ruff check src/ tests/ web/ examples/
+      - name: Ruff format check
+        run: ruff format --check src/ tests/ web/ examples/
+
+  import-smoke:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install package (no extras)
+        run: pip install -e .
+      - name: Import-only smoke test
+        run: |
+          python - <<'PY'
+          # Verify athena_r1 imports cleanly without web/vllm extras + with
+          # no Azure credentials configured. Catches regressions like the
+          # hard `from gradio import ChatMessage` we hit earlier.
+          import sys
+          sys.modules['gradio'] = None  # block gradio from being imported
+          import os
+          for k in ['AZURE_API_KEY','AZURE_OPENAI_API_KEY','AZURE_OPENAI_ENDPOINT']:
+              os.environ.pop(k, None)
+          os.environ['TOOLUNIVERSE_API'] = 'http://does-not-exist:9999'
+          from athena_r1 import AthenaR1, RoundEvent, Backend, AnswerResult, __version__
+          print(f"athena_r1 v{__version__} imports OK on Python {sys.version_info[:2]}")
+          # Constructor must succeed without Azure credentials or a real vllm.
+          agent = AthenaR1(model='dummy', vllm_url='http://x/v1')
+          assert agent._core.format == 'qwen'
+          assert agent._core.max_token == 36864
+          print("AthenaR1() constructed OK")
+          PY
+
+  pytest:
+    runs-on: ubuntu-latest
+    needs: import-smoke
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install package + dev extras
+        run: pip install -e ".[web,dev]"
+      - name: Pytest (offline tests only)
+        run: |
+          # The full pytest suite needs a live vLLM + ToolUniverse server,
+          # which CI doesn't have. Run the offline tests (smoke import, CLI,
+          # validation, lifecycle, info, answer-result, api-edges, the
+          # OpenAI-server multi-turn helpers, and the multi-agent unit tests
+          # that monkeypatch out the engine). Tests that depend on the live
+          # `agent` fixture skip automatically when the upstream servers
+          # aren't reachable (see `tests/conftest.py`).
+          pytest tests/test_smoke.py::test_imports_only \
+                 tests/test_cli.py \
+                 tests/test_info.py \
+                 tests/test_validation.py \
+                 tests/test_lifecycle.py \
+                 tests/test_answer_result.py \
+                 tests/test_api_edges.py \
+                 tests/test_agui_multiturn.py \
+                 tests/test_agui_id_encoding.py \
+                 tests/test_agui_upstream_failures.py \
+                 tests/test_agui_resource_leak.py \
+                 tests/test_agui_edge_events.py \
+                 tests/test_agui_concurrency.py \
+                 tests/test_openai_server_error_path.py \
+                 tests/test_timeout_and_multiturn.py::test_openai_server_multiturn_history_folded \
+                 tests/test_timeout_and_multiturn.py::test_openai_server_singleturn_skips_history \
+                 tests/test_timeout_and_multiturn.py::test_openai_server_system_message_preserved \
+                 tests/test_report_digest.py \
+                 tests/test_report_generate.py \
+                 tests/test_report_api.py \
+                 tests/test_report_endpoint.py \
+                 tests/test_report_openai.py \
+                 -v

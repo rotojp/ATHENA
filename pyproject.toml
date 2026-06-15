@@ -1,0 +1,100 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "athena-r1"
+version = "1.0.0"
+description = "An AI agent for treatment reasoning over a biomedical tool universe"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Shanghua Gao", email = "shanghuagao@gmail.com" },
+]
+keywords = ["llm", "biomedical", "agent", "tool-use", "reinforcement-learning"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "openai>=1.0",
+    "transformers>=4.40",
+    "tooluniverse>=0.3",
+    "jinja2",
+    "numpy",
+    "torch>=2.0",
+]
+
+[project.optional-dependencies]
+vllm = ["vllm>=0.6"]
+web = [
+    "fastapi>=0.100",
+    "uvicorn[standard]>=0.20",
+    "ag-ui-protocol>=0.1",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-timeout>=2.0",
+    "ruff>=0.7",
+    "mypy>=1.10",
+    "pre-commit>=4.0",
+    "requests>=2.31",
+]
+
+[project.urls]
+Homepage = "https://athena.openscientist.ai/"
+Repository = "https://github.com/mims-harvard/ATHENA"
+Issues = "https://github.com/mims-harvard/ATHENA/issues"
+
+[project.scripts]
+athena-r1 = "athena_r1.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+athena_r1 = ["py.typed"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["src/athena_r1/_core.py"]  # legacy engine; tracked separately
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "UP",   # pyupgrade
+]
+ignore = [
+    "E501",  # line too long — handled by formatter
+    "B008",  # default-arg-call: common for FastAPI Depends() / dataclass field()
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::FutureWarning",
+]
+
+[tool.mypy]
+python_version = "3.10"
+# Public API is type-annotated; the legacy `_core.py` engine is not, and
+# its 1.6k LoC is tracked for a future cleanup pass.
+files = ["src/athena_r1/agent.py", "src/athena_r1/_version.py", "src/athena_r1/__main__.py"]
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
