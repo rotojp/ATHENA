@@ -4,9 +4,11 @@ import json
 import logging
 import os
 import re
+import threading
 import traceback
 from typing import Any, Dict, List, Optional
 
+import httpx
 from jinja2 import Template
 from openai import AzureOpenAI, OpenAI
 from tooluniverse import ToolUniverse
@@ -532,7 +534,20 @@ class AthenaCore:
 
         if not self.vllm_server_url.endswith('/v1'):
             self.vllm_server_url = f"{self.vllm_server_url.rstrip('/')}/v1"
-        self.model = OpenAI(api_key="EMPTY", base_url=self.vllm_server_url)
+        # Per-request timeout for the vLLM client. The OpenAI SDK defaults to a
+        # 600 s read timeout, so an occasional stuck vLLM request (one that never
+        # returns its first token under concurrency) would block a whole question
+        # for ~10 min before failing. A tighter read timeout makes such a hang
+        # surface in seconds so the round loop / caller can retry instead of
+        # losing the question. Override with ATHENA_VLLM_READ_TIMEOUT (seconds;
+        # set 0 to restore the SDK default).
+        _read_to = float(os.environ.get("ATHENA_VLLM_READ_TIMEOUT", "120"))
+        _client_timeout = (
+            httpx.Timeout(connect=10.0, read=_read_to, write=_read_to, pool=_read_to)
+            if _read_to > 0 else None
+        )
+        self.model = OpenAI(api_key="EMPTY", base_url=self.vllm_server_url,
+                            timeout=_client_timeout)
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         self.chat_template = Template(self.tokenizer.chat_template)
 
@@ -965,43 +980,96 @@ class AthenaCore:
         if is_summary_call:
             kwargs["stop"] = ["</think>"]
 
-        try:
-            if cancel_event is not None:
-                # Streaming generation so the engine can abort mid-token when
-                # the client disconnects. The blocking (non-stream) path runs
-                # to full max_new_tokens before the round loop can re-check
-                # cancellation — for a verbose answer that's 40-50s of wasted
-                # GPU per in-flight round. Here we poll cancel_event every
-                # chunk and, on cancel, close the stream: dropping the HTTP
-                # connection makes vLLM abort the sequence server-side and
-                # free the GPU immediately. In the non-cancelled case the
-                # concatenated chunks are byte-identical to the blocking
-                # result, so output is unchanged for normal completions.
-                kwargs["stream"] = True
-                parts = []
-                stream = model.completions.create(**kwargs)
-                try:
-                    for ch in stream:
-                        if cancel_event.is_set():
-                            break
-                        if getattr(ch, "choices", None):
-                            piece = ch.choices[0].text
-                            if piece:
-                                parts.append(piece)
-                finally:
+        # Retry transient vLLM failures (timeouts / connection drops). With the
+        # client read-timeout above, an occasionally-stuck request now fails in
+        # ~2 min instead of ~10; retrying it almost always succeeds, so a single
+        # bad request no longer loses the whole question. Honors cancel_event
+        # between attempts so a disconnected client still aborts fast.
+        _max_attempts = int(os.environ.get("ATHENA_VLLM_MAX_RETRIES", "3"))
+        output = ""
+        _api_failed = False
+        for _attempt in range(_max_attempts):
+            if cancel_event is not None and cancel_event.is_set():
+                break
+            try:
+                if cancel_event is not None:
+                    # Streaming generation so the engine can abort mid-token when
+                    # the client disconnects. The blocking (non-stream) path runs
+                    # to full max_new_tokens before the round loop can re-check
+                    # cancellation — for a verbose answer that's 40-50s of wasted
+                    # GPU per in-flight round. Here we poll cancel_event every
+                    # chunk and, on cancel, close the stream: dropping the HTTP
+                    # connection makes vLLM abort the sequence server-side and
+                    # free the GPU immediately. In the non-cancelled case the
+                    # concatenated chunks are byte-identical to the blocking
+                    # result, so output is unchanged for normal completions.
+                    kwargs["stream"] = True
+                    parts = []
+                    stream = model.completions.create(**kwargs)
+                    # First-chunk watchdog. The SDK blocks inside the `for`
+                    # below on the first __next__() until vLLM emits chunk 1.
+                    # httpx's read-timeout guards inter-chunk gaps but has been
+                    # seen NOT to fire when vLLM accepts the request yet never
+                    # schedules the sequence (no first chunk, no error, socket
+                    # held open) — that hangs the whole question. A one-shot
+                    # timer closes the stream if chunk 1 never arrives; the
+                    # close drops the connection so __next__() raises and we
+                    # fall through to the retry below. Once generation is
+                    # underway we retire the watchdog and let the read-timeout
+                    # cover the (working) inter-chunk case.
+                    _first_chunk_to = float(os.environ.get(
+                        "ATHENA_VLLM_FIRST_CHUNK_TIMEOUT", "90"))
+                    _wd_lock = threading.Lock()
+                    _wd_closed = [False]
+
+                    # Bind this iteration's stream/lock/flag as defaults so the
+                    # timer never touches a later attempt's reassigned objects.
+                    def _close_stuck_stream(_s=stream, _lock=_wd_lock, _closed=_wd_closed):
+                        with _lock:
+                            if not _closed[0]:
+                                _closed[0] = True
+                                try:
+                                    _s.close()
+                                except Exception:  # noqa: BLE001
+                                    pass
+                    _timer = (threading.Timer(_first_chunk_to, _close_stuck_stream)
+                              if _first_chunk_to > 0 else None)
+                    if _timer is not None:
+                        _timer.daemon = True
+                        _timer.start()
                     try:
-                        stream.close()
-                    except Exception:  # noqa: BLE001
-                        pass
-                output = "".join(parts).strip()
-            else:
-                output_raw = model.completions.create(**kwargs)
-                output = output_raw.choices[0].text.strip()
-        except Exception as e:
-            logger.info(f"[llm_infer] API error: {e}")
-            output = ""
-            if check_token_status:
-                return None, True
+                        _first = True
+                        for ch in stream:
+                            if _first:
+                                if _timer is not None:
+                                    _timer.cancel()
+                                _first = False
+                            if cancel_event.is_set():
+                                break
+                            if getattr(ch, "choices", None):
+                                piece = ch.choices[0].text
+                                if piece:
+                                    parts.append(piece)
+                    finally:
+                        if _timer is not None:
+                            _timer.cancel()
+                        try:
+                            stream.close()
+                        except Exception:  # noqa: BLE001
+                            pass
+                    output = "".join(parts).strip()
+                else:
+                    output_raw = model.completions.create(**kwargs)
+                    output = output_raw.choices[0].text.strip()
+                _api_failed = False
+                break
+            except Exception as e:  # noqa: BLE001
+                _api_failed = True
+                output = ""
+                logger.info(
+                    f"[llm_infer] API error (attempt {_attempt + 1}/{_max_attempts}): {e}")
+        if _api_failed and check_token_status:
+            return None, True
 
         logger.info("" + output + "")
         if check_token_status and self.max_token is not None:
@@ -1290,8 +1358,35 @@ class AthenaCore:
             "stream": True,
         }
         stream = self.model.completions.create(**kwargs)
+        # First-chunk watchdog (mirrors llm_infer): without a retry wrapper this
+        # path would hang forever if vLLM accepts the request but never emits a
+        # first chunk. The timer closes the stream so __next__() raises and the
+        # caller sees a fast error instead of an indefinite hang.
+        _first_chunk_to = float(os.environ.get(
+            "ATHENA_VLLM_FIRST_CHUNK_TIMEOUT", "90"))
+        _wd_lock = threading.Lock()
+        _wd_closed = [False]
+
+        def _close_stuck_stream(_s=stream, _lock=_wd_lock, _closed=_wd_closed):
+            with _lock:
+                if not _closed[0]:
+                    _closed[0] = True
+                    try:
+                        _s.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+        _timer = (threading.Timer(_first_chunk_to, _close_stuck_stream)
+                  if _first_chunk_to > 0 else None)
+        if _timer is not None:
+            _timer.daemon = True
+            _timer.start()
         try:
+            _first = True
             for ch in stream:
+                if _first:
+                    if _timer is not None:
+                        _timer.cancel()
+                    _first = False
                 if cancel_event is not None and cancel_event.is_set():
                     break
                 if getattr(ch, "choices", None):
@@ -1299,6 +1394,8 @@ class AthenaCore:
                     if piece:
                         yield piece
         finally:
+            if _timer is not None:
+                _timer.cancel()
             try:
                 stream.close()
             except Exception:  # noqa: BLE001

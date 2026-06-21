@@ -62,30 +62,53 @@ def get_model_id() -> str:
     return r.json()["data"][0]["id"]
 
 
+# How many times to re-attempt a question that produced no answer (empty
+# prediction or a wall-clock timeout). Under K-way concurrency vLLM very
+# occasionally leaves one request stuck until the per-question timeout fires;
+# the same question almost always succeeds on a fresh attempt (different
+# concurrency timing), so a single retry keeps a rare infra hiccup from
+# costing a real prediction. Set 0 to disable.
+STUCK_Q_RETRIES = int(os.environ.get("STUCK_Q_RETRIES", "2"))
+
+
+def _attempt_one(agent, question, options, gold):
+    """One Stage-1 + Stage-2 attempt. Returns (pred, correct, rounds, stuck)
+    where ``stuck`` is True iff the run produced no usable answer (empty /
+    wall-clock cancelled) and is worth retrying."""
+    timeout = PER_QUESTION_TIMEOUT if PER_QUESTION_TIMEOUT > 0 else None
+    result = agent.answer(question, temperature=0.7, max_round=40, timeout=timeout)
+    if not result.answer:
+        return "", False, result.rounds_used, True
+    from athena_r1 import Backend
+
+    pred = agent.map_to_option(result.conversation, options, backend=Backend.ATHENA)
+    return pred, pred == gold, result.rounds_used, bool(result.cancelled)
+
+
 def evaluate_one(agent, idx: int, sample: dict, log_lock) -> dict:
     question = sample["question"]
     options = sample["options"]
     gold = sample["correct_answer"]
 
     t0 = time.time()
-    try:
-        timeout = PER_QUESTION_TIMEOUT if PER_QUESTION_TIMEOUT > 0 else None
-        result = agent.answer(question, temperature=0.7, max_round=40, timeout=timeout)
-        if not result.answer:
-            pred = ""
-            correct = False
-        else:
-            from athena_r1 import Backend
-
-            pred = agent.map_to_option(result.conversation, options, backend=Backend.ATHENA)
-            correct = pred == gold
-        rounds = result.rounds_used
-    except Exception as e:  # noqa: BLE001
-        pred = ""
-        correct = False
-        rounds = 0
-        with log_lock:
-            print(f"  [{idx}] EXCEPTION: {e!r}", flush=True)
+    pred, correct, rounds, retries = "", False, 0, 0
+    for attempt in range(STUCK_Q_RETRIES + 1):
+        retries = attempt  # number of re-attempts performed before this one
+        try:
+            pred, correct, rounds, stuck = _attempt_one(agent, question, options, gold)
+            if not stuck:
+                break  # got a real answer — done
+            if attempt < STUCK_Q_RETRIES:
+                with log_lock:
+                    print(
+                        f"  [{idx}] stuck (empty/timeout), retry {attempt + 1}/{STUCK_Q_RETRIES}",
+                        flush=True,
+                    )
+        except Exception as e:  # noqa: BLE001
+            pred, correct, rounds = "", False, 0
+            with log_lock:
+                print(f"  [{idx}] EXCEPTION: {e!r}", flush=True)
+            break
 
     elapsed = time.time() - t0
     rec = {
@@ -96,6 +119,8 @@ def evaluate_one(agent, idx: int, sample: dict, log_lock) -> dict:
         "rounds": rounds,
         "elapsed_s": round(elapsed, 1),
     }
+    if retries:
+        rec["retries"] = retries
     return rec
 
 
