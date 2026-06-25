@@ -156,26 +156,40 @@ def main() -> int:
     agent.init()
     print(f"Agent ready. Running {len(pending)} Qs with concurrency={CONCURRENT_QS}", flush=True)
 
+    def _record(rec):
+        done[rec["id"]] = rec
+        with log_lock:
+            progress_fh.write(json.dumps(rec) + "\n")
+            progress_fh.flush()
+            n_done_so_far = len(done)
+            vals = list(done.values())
+            n_corr = sum(1 for r in vals if r.get("correct"))
+            acc = n_corr / len(vals)
+            mark = "✓" if rec["correct"] else "✗"
+            print(
+                f"  [{n_done_so_far}/{len(data)}] {mark} pred={rec['predict']!r:5} "
+                f"gold={rec['label']!r:3} acc={acc * 100:5.1f}% "
+                f"rounds={rec['rounds']} t={rec['elapsed_s']}s",
+                flush=True,
+            )
+
+    # Warm up the shared agent single-threaded before fanning out. Tool_RAG (the
+    # tool-retrieval embedder) is lazy-loaded on first use and its init is NOT
+    # thread-safe: if N workers race to load it concurrently, all-but-one hit a
+    # "Cannot copy out of meta tensor" error, Tool_RAG gets dropped from the
+    # loaded tools, and every subsequent question silently degrades to a 1-round
+    # bare answer (acc collapses ~75% -> ~60%). Loading it once here, on the
+    # first pending question, makes the shared instance ready for all workers.
+    if pending and CONCURRENT_QS > 1:
+        widx, wsample = pending[0]
+        pending = pending[1:]
+        print("  [warmup] loading Tool_RAG single-threaded on first question...", flush=True)
+        _record(evaluate_one(agent, widx, wsample, log_lock))
+
     with ThreadPoolExecutor(max_workers=CONCURRENT_QS) as ex:
         futures = {ex.submit(evaluate_one, agent, idx, s, log_lock): idx for idx, s in pending}
         for fut in as_completed(futures):
-            rec = fut.result()
-            done[rec["id"]] = rec
-            with log_lock:
-                progress_fh.write(json.dumps(rec) + "\n")
-                progress_fh.flush()
-                n_done_so_far = len(done)
-                # Use only the cells we have computed (not resumed) for live acc:
-                vals = list(done.values())
-                n_corr = sum(1 for r in vals if r.get("correct"))
-                acc = n_corr / len(vals)
-                mark = "✓" if rec["correct"] else "✗"
-                print(
-                    f"  [{n_done_so_far}/{len(data)}] {mark} pred={rec['predict']!r:5} "
-                    f"gold={rec['label']!r:3} acc={acc * 100:5.1f}% "
-                    f"rounds={rec['rounds']} t={rec['elapsed_s']}s",
-                    flush=True,
-                )
+            _record(fut.result())
 
     progress_fh.close()
     return summarize(done)
