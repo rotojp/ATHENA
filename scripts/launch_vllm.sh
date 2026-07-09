@@ -9,6 +9,11 @@ PORT=${1:-8000}
 MODEL=${2:-mims-harvard/ATHENA-R1-Qwen3-8B}
 GPU_MEM=${GPU_MEM:-0.80}
 
+# Prefer the repo venv's binaries (vllm, python) when present, so the script
+# doesn't depend on the caller having the right environment activated.
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+[ -d "$REPO/.venv/bin" ] && PATH="$REPO/.venv/bin:$PATH"
+
 # Redirect vLLM's torch.compile cache to LOCAL node disk. On many shared
 # clusters the default (~/.cache/vllm) — or an already-exported VLLM_CACHE_ROOT —
 # lives on a quota-limited network filesystem; if that quota is full the

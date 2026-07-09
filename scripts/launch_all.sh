@@ -36,6 +36,13 @@ PYTHON=${PYTHON:-python}
 
 cd "$(dirname "$0")/.."
 
+# Prefer the repo venv so `vllm`, the web servers, and tooluniverse all resolve
+# to the project's installed interpreter regardless of the caller's active env.
+[ -d "$PWD/.venv/bin" ] && PATH="$PWD/.venv/bin:$PATH"
+if [ -x "$PWD/.venv/bin/python" ] && { [ -z "${PYTHON:-}" ] || [ "${PYTHON}" = "python" ]; }; then
+    PYTHON="$PWD/.venv/bin/python"
+fi
+
 healthy() {  # healthy <port> <path>
     curl -sf "http://0.0.0.0:${1}${2}" -m 3 >/dev/null 2>&1
 }

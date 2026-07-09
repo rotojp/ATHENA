@@ -569,11 +569,11 @@ class AthenaCore:
         # Otherwise fall back to local ToolUniverse (high memory per instance).
         api_url = os.environ.get("TOOLUNIVERSE_API")
         if api_url:
-            from tooluniverse import ToolUniverseClient
+            from athena_r1._tu_compat import CompatToolUniverseClient
             if not api_url.startswith("http"):
                 api_url = "http://" + api_url
             logger.info(f"Using ToolUniverse server: {api_url}")
-            self.tooluniverse = ToolUniverseClient(api_url)
+            self.tooluniverse = CompatToolUniverseClient(api_url)
         else:
             self.tooluniverse = ToolUniverse(tool_files=self.tool_files_dict)
         if tool_type is not None:
