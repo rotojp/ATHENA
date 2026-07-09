@@ -5,6 +5,7 @@
 # For web servers (AG-UI / OpenAI-compat):  see pyproject [web] extra
 
 openai>=1.0
+httpx
 transformers>=4.40
 tooluniverse>=0.3
 jinja2
