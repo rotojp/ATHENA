@@ -16,8 +16,11 @@
 # Env knobs:
 #   MLX_HOST        bind host (default 127.0.0.1)
 #   MLX_VENV        isolated venv path (default <repo>/.venv-mlx)
-#   MLX_QUANT_BITS  if set (e.g. 4 or 8), serve a locally-quantized copy to cut
-#                   RAM (~16GB bf16 -> ~4.5GB at 4-bit). First run converts.
+#   MLX_QUANT_BITS  quantization width. Unset -> auto-select from physical RAM
+#                   (the 8B model is ~16GB bf16 / ~8.5GB 8-bit / ~4.5GB 4-bit, so
+#                   a RAM-tight Mac otherwise swaps and generation crawls). Set a
+#                   number (e.g. 4 or 8) to pin it, or `native`/`0` for full
+#                   precision. First quantized run converts once and caches.
 #   MLX_MODELS_DIR  where quantized copies live (default <repo>/.mlx-models)
 set -eu
 
@@ -49,23 +52,43 @@ if ! "$PY" -c "import mlx_lm.server" >/dev/null 2>&1; then
         "mlx-lm==0.31.3" "transformers==5.10.0"
 fi
 
-# ── optional quantization ────────────────────────────────────────────────────
-# The quantized copy MUST live in a directory whose name equals $MODEL, and the
-# server must be started from its parent, so that a request for the HF id
+# ── choose quantization ──────────────────────────────────────────────────────
+# If the caller hasn't pinned MLX_QUANT_BITS, pick a width that fits physical RAM
+# (unified memory on Apple Silicon), leaving headroom for the KV cache and the
+# separate ToolUniverse embedding server. This is the future-proof default: it
+# stops a RAM-tight Mac from silently serving bf16 into swap.
+if [ -z "${MLX_QUANT_BITS:-}" ]; then
+    RAM_GB=$(( $(sysctl -n hw.memsize) / 1073741824 ))
+    if   [ "$RAM_GB" -ge 32 ]; then MLX_QUANT_BITS=native
+    elif [ "$RAM_GB" -ge 20 ]; then MLX_QUANT_BITS=8
+    else                            MLX_QUANT_BITS=4
+    fi
+    echo "→ Detected ${RAM_GB}GB RAM; auto-selected MLX_QUANT_BITS=$MLX_QUANT_BITS (set it to override)"
+fi
+
+# ── quantization ─────────────────────────────────────────────────────────────
+# For a quantized width, the copy MUST live in a directory whose name equals
+# $MODEL, and the server must start from its parent, so a request for the HF id
 # resolves to the local (quantized) weights instead of re-downloading bf16.
+# `native`/`0` serves the full-precision HF id directly.
 SERVE_MODEL="$MODEL"
 SERVE_CWD="$REPO"
-if [ -n "${MLX_QUANT_BITS:-}" ]; then
-    MODELS_DIR=${MLX_MODELS_DIR:-$REPO/.mlx-models}
-    QDIR="$MODELS_DIR/$MODEL"
-    if [ ! -d "$QDIR" ]; then
-        echo "→ Converting $MODEL to ${MLX_QUANT_BITS}-bit MLX at $QDIR (first run only)…"
-        "$PY" -m mlx_lm convert --hf-path "$MODEL" --mlx-path "$QDIR" \
-            -q --q-bits "$MLX_QUANT_BITS"
-    fi
-    SERVE_CWD="$MODELS_DIR"   # so the relative name "$MODEL" resolves to $QDIR
-    echo "→ Serving ${MLX_QUANT_BITS}-bit copy from $QDIR"
-fi
+case "$MLX_QUANT_BITS" in
+    native | 0)
+        echo "→ Serving $MODEL at full precision (no quantization)"
+        ;;
+    *)
+        MODELS_DIR=${MLX_MODELS_DIR:-$REPO/.mlx-models}
+        QDIR="$MODELS_DIR/$MODEL"
+        if [ ! -d "$QDIR" ]; then
+            echo "→ Converting $MODEL to ${MLX_QUANT_BITS}-bit MLX at $QDIR (first run only)…"
+            "$PY" -m mlx_lm convert --hf-path "$MODEL" --mlx-path "$QDIR" \
+                -q --q-bits "$MLX_QUANT_BITS"
+        fi
+        SERVE_CWD="$MODELS_DIR"   # so the relative name "$MODEL" resolves to $QDIR
+        echo "→ Serving ${MLX_QUANT_BITS}-bit copy from $QDIR"
+        ;;
+esac
 
 if pgrep -f "mlx_lm server .*--port $PORT" >/dev/null 2>&1; then
     echo "MLX server already running on :$PORT"
