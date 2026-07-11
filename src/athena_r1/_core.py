@@ -411,7 +411,7 @@ class AthenaCore:
                  cache_tool=False,
                  tool_in_results=False,
                  add_call_id=True,
-                 vllm_server_url='http://0.0.0.0:8000',
+                 vllm_server_url='http://127.0.0.1:8000',
                  max_token=32768,
                  compress_ratio=3.5,
                  tool_call_max_retries=3,

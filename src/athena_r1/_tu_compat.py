@@ -36,16 +36,40 @@ DEFAULT_TIMEOUT = float(os.environ.get("ATHENA_TU_TIMEOUT", "120"))
 class CompatToolUniverseClient(ToolUniverseClient):
     """``ToolUniverseClient`` with positional-arg support and a longer timeout."""
 
+    # Parameter names for the methods the engine calls positionally, used when
+    # the server's /api/methods introspection is unavailable (e.g. a slow or
+    # briefly unreachable server, whose empty result the base client caches).
+    # Without this, a valid positional call would raise a misleading
+    # "0 parameters" TypeError. Kept in sync with the ToolUniverse API.
+    _FALLBACK_PARAMS = {
+        "tool_specification": ["tool_name", "return_prompt", "format"],
+        "run_one_function": [
+            "function_call_json",
+            "stream_callback",
+            "use_cache",
+            "validate",
+        ],
+        "prepare_tool_prompts": ["tool_list", "mode", "valid_keys"],
+        "extract_function_call_json": ["lst", "return_message", "verbose", "format"],
+    }
+
     def __init__(self, *args: Any, timeout: float = DEFAULT_TIMEOUT, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self._call_timeout = timeout
 
     def _param_names(self, method_name: str) -> list[str]:
-        """Ordered parameter names the server advertises for ``method_name``."""
+        """Ordered parameter names for ``method_name``.
+
+        Prefers the server's ``/api/methods`` introspection; falls back to a
+        static map so a slow or unreachable server can't turn a valid positional
+        call into a spurious "0 parameters" error.
+        """
         for info in self._get_available_methods():
             if info.get("name") == method_name:
-                return [p.get("name") for p in info.get("parameters", [])]
-        return []
+                params = [p.get("name") for p in info.get("parameters", [])]
+                if params:
+                    return params
+        return self._FALLBACK_PARAMS.get(method_name, [])
 
     def _call(self, method_name: str, kwargs: dict[str, Any]) -> Any:
         """POST a method call to the server with the configured timeout."""
