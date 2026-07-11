@@ -81,6 +81,14 @@ case "$MLX_QUANT_BITS" in
         MODELS_DIR=${MLX_MODELS_DIR:-$REPO/.mlx-models}
         QDIR="$MODELS_DIR/$MODEL"
         if [ ! -d "$QDIR" ]; then
+            # mlx_lm convert's save step re-resolves the source repo with
+            # local_files_only=True and aborts with IncompleteSnapshotError if the
+            # HF cache is missing any file (a running server fetches only the
+            # weights it needs, leaving e.g. README.md / .gitattributes absent).
+            # Ensure the full snapshot is present first; skip quietly for a local
+            # path (snapshot_download raises on a non-repo-id).
+            echo "→ Ensuring complete HF snapshot of $MODEL (mlx convert requires it)…"
+            "$PY" -c "import sys; from huggingface_hub import snapshot_download; snapshot_download(sys.argv[1])" "$MODEL" || true
             echo "→ Converting $MODEL to ${MLX_QUANT_BITS}-bit MLX at $QDIR (first run only)…"
             "$PY" -m mlx_lm convert --hf-path "$MODEL" --mlx-path "$QDIR" \
                 -q --q-bits "$MLX_QUANT_BITS"
