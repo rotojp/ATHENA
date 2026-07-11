@@ -54,8 +54,11 @@ if [ -z "${MODEL_BACKEND:-}" ]; then
     fi
 fi
 
+# Probe/connect over 127.0.0.1, not 0.0.0.0: the loopback-bound servers (TU and
+# MLX default to 127.0.0.1) are unreachable via 0.0.0.0 on macOS, and 127.0.0.1
+# also reaches a 0.0.0.0-bound server (vLLM) on Linux — so it's correct on both.
 healthy() {  # healthy <port> <path>
-    curl -sf "http://0.0.0.0:${1}${2}" -m 3 >/dev/null 2>&1
+    curl -sf "http://127.0.0.1:${1}${2}" -m 3 >/dev/null 2>&1
 }
 report() {
     healthy 8080 /health        && echo "  ✓ ToolUniverse  :8080" || echo "  ✗ ToolUniverse  :8080"
@@ -129,8 +132,8 @@ else
     done
 fi
 
-export VLLM_URL=http://0.0.0.0:8000/v1
-export TOOLUNIVERSE_API=http://0.0.0.0:8080
+export VLLM_URL=http://127.0.0.1:8000/v1
+export TOOLUNIVERSE_API=http://127.0.0.1:8080
 export ATHENA_MODEL_PATH="$MODEL"
 export AZURE_API_KEY=${AZURE_API_KEY:-dummy}
 export ATHENA_R1_LOG_LEVEL=${ATHENA_R1_LOG_LEVEL:-WARNING}
