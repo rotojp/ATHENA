@@ -35,6 +35,9 @@ models/
 logs/
 training_logs/
 
+# Claude Code personal settings (advisor model, etc. — machine/user-specific)
+.claude/settings.local.json
+
 # Benchmark artifacts (resumable run state — machine-specific + multi-MB)
 tests/reproducibility_full.jsonl
 *_progress.jsonl
