@@ -1,7 +1,8 @@
 #!/bin/bash
 # One-shot, IDEMPOTENT launcher for the full ATHENA-R1 stack:
 #   • ToolUniverse HTTP server on :8080
-#   • vLLM serving the model on :8000
+#   • model server on :8000 — vLLM, or MLX on Apple Silicon (vLLM has no macOS
+#     build); override with MODEL_BACKEND=vllm|mlx
 #   • AG-UI server on :8090 (with the bundled browser demo at /)
 #   • OpenAI-compat server on :9000
 #
@@ -43,12 +44,25 @@ if [ -x "$PWD/.venv/bin/python" ] && { [ -z "${PYTHON:-}" ] || [ "${PYTHON}" = "
     PYTHON="$PWD/.venv/bin/python"
 fi
 
+# Model-server backend: vLLM has no macOS build, so serve via MLX on Apple
+# Silicon. Override with MODEL_BACKEND=vllm|mlx.
+if [ -z "${MODEL_BACKEND:-}" ]; then
+    if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
+        MODEL_BACKEND=mlx
+    else
+        MODEL_BACKEND=vllm
+    fi
+fi
+
+# Probe/connect over 127.0.0.1, not 0.0.0.0: the loopback-bound servers (TU and
+# MLX default to 127.0.0.1) are unreachable via 0.0.0.0 on macOS, and 127.0.0.1
+# also reaches a 0.0.0.0-bound server (vLLM) on Linux — so it's correct on both.
 healthy() {  # healthy <port> <path>
-    curl -sf "http://0.0.0.0:${1}${2}" -m 3 >/dev/null 2>&1
+    curl -sf "http://127.0.0.1:${1}${2}" -m 3 >/dev/null 2>&1
 }
 report() {
     healthy 8080 /health        && echo "  ✓ ToolUniverse  :8080" || echo "  ✗ ToolUniverse  :8080"
-    healthy 8000 /v1/models     && echo "  ✓ vLLM          :8000" || echo "  ✗ vLLM          :8000"
+    healthy 8000 /v1/models     && echo "  ✓ model ($MODEL_BACKEND) :8000" || echo "  ✗ model ($MODEL_BACKEND) :8000"
     healthy 8090 /health        && echo "  ✓ AG-UI demo    :8090" || echo "  ✗ AG-UI demo    :8090"
     healthy 9000 /health        && echo "  ✓ OpenAI-compat :9000" || echo "  ✗ OpenAI-compat :9000"
 }
@@ -63,6 +77,8 @@ stop_stack() {
     pkill -u "$USER" -f "web/openai_server.py" 2>/dev/null || true
     pkill -u "$USER" -f "vllm serve"           2>/dev/null || true
     pkill -u "$USER" -f "EngineCore"           2>/dev/null || true
+    pkill -u "$USER" -f "launch_mlx.sh"        2>/dev/null || true
+    pkill -u "$USER" -f "mlx_lm"               2>/dev/null || true
     pkill -u "$USER" -f "tooluniverse.http"    2>/dev/null || true
     sleep 3
 }
@@ -79,9 +95,26 @@ else
     disown
 fi
 
-# ── vLLM ─────────────────────────────────────────────────────────────────
+# ── model server (:8000) ───────────────────────────────────────────────────
 if healthy 8000 /v1/models; then
-    echo "✓ vLLM already up on :8000 (skipping)"
+    echo "✓ model server already up on :8000 (skipping)"
+elif [ "$MODEL_BACKEND" = mlx ]; then
+    echo "→ Starting MLX server on :8000 with $MODEL (log: ${LOG_DIR}/athena_mlx.log)"
+    bash scripts/launch_mlx.sh 8000 "$MODEL" > "${LOG_DIR}/athena_mlx.log" 2>&1 &
+    disown
+    echo "  waiting for :8000 /v1/models (first run converts weights — can take a while)…"
+    for i in $(seq 1 360); do
+        healthy 8000 /v1/models && { echo "  ✓ MLX ready after $((i*5))s"; break; }
+        # Fail fast if the launcher died. Match the launcher and both mlx_lm
+        # phases (convert, then serve) so the cold conversion isn't mistaken for
+        # a crash.
+        if ! pgrep -u "$USER" -f "launch_mlx.sh|mlx_lm" >/dev/null 2>&1; then
+            echo "  ✗ MLX process exited — check ${LOG_DIR}/athena_mlx.log" >&2
+            tail -5 "${LOG_DIR}/athena_mlx.log" 2>/dev/null >&2
+            exit 1
+        fi
+        sleep 5
+    done
 else
     echo "→ Starting vLLM on :8000 with $MODEL (log: ${LOG_DIR}/athena_vllm.log)"
     bash scripts/launch_vllm.sh 8000 "$MODEL" > "${LOG_DIR}/athena_vllm.log" 2>&1 &
@@ -99,8 +132,8 @@ else
     done
 fi
 
-export VLLM_URL=http://0.0.0.0:8000/v1
-export TOOLUNIVERSE_API=http://0.0.0.0:8080
+export VLLM_URL=http://127.0.0.1:8000/v1
+export TOOLUNIVERSE_API=http://127.0.0.1:8080
 export ATHENA_MODEL_PATH="$MODEL"
 export AZURE_API_KEY=${AZURE_API_KEY:-dummy}
 export ATHENA_R1_LOG_LEVEL=${ATHENA_R1_LOG_LEVEL:-WARNING}

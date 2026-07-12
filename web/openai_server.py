@@ -156,8 +156,8 @@ def get_agent() -> AthenaR1:
         if _agent is None:
             _agent = AthenaR1(
                 model=os.environ.get("ATHENA_MODEL_PATH", "mims-harvard/ATHENA-R1-Qwen3-8B"),
-                vllm_url=os.environ.get("VLLM_URL", "http://0.0.0.0:8000/v1"),
-                tool_server=os.environ.get("TOOLUNIVERSE_API", "http://0.0.0.0:8080"),
+                vllm_url=os.environ.get("VLLM_URL", "http://127.0.0.1:8000/v1"),
+                tool_server=os.environ.get("TOOLUNIVERSE_API", "http://127.0.0.1:8080"),
             )
         if not getattr(_agent, "_initialized", True):
             _agent.init()
