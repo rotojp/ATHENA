@@ -13,6 +13,7 @@ dist/
 .coverage
 htmlcov/
 .venv/
+.venv-mlx/
 venv/
 ENV/
 .env
@@ -29,6 +30,7 @@ ENV/
 *.gguf
 checkpoints/
 models/
+.mlx-models/
 
 # Logs
 *.log
