@@ -6,8 +6,9 @@ agent-chat-ui, LangGraph Studio, …) can connect without code changes.
 
 Run:
     python web/agui_server.py
-    # → POST  http://0.0.0.0:8090/    (AG-UI endpoint)
-    # → GET   http://0.0.0.0:8090/health
+    # → POST  http://127.0.0.1:8090/    (AG-UI endpoint)
+    # → GET   http://127.0.0.1:8090/health
+    # Binds loopback by default; set HOST=0.0.0.0 to expose (add auth first).
 
 Spec: https://docs.ag-ui.com/concepts/events
 """
@@ -121,11 +122,49 @@ def _current_backend() -> tuple[str, str]:
     return backend, model
 
 
-def _maybe_switch_backend(hdr_backend: str | None, hdr_model: str | None) -> None:
-    """Apply a per-request backend/model override (demo settings panel).
+# Which env var holds each backend's API key.
+_BACKEND_KEY_ENV = {
+    "claude": "ANTHROPIC_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "gpt": "AZURE_API_KEY",
+}
 
-    Absent headers leave the server default untouched. A changed selection sets
-    the env and drops the singleton so the next request rebuilds the agent.
+
+def _client_is_loopback(request: Request) -> bool:
+    """True iff the request's socket peer is loopback.
+
+    Uses the real transport peer address (``request.client.host``), NOT any
+    forwarding header — those are attacker-controlled and must never gate a
+    security decision.
+    """
+    host = (request.client.host if request.client else "") or ""
+    return host in ("127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost")
+
+
+def _browser_key_allowed(request: Request) -> bool:
+    """Whether a browser-supplied API key will be honored for this request.
+
+    Safe by default: only loopback callers (the bundled local demo) may SET a
+    key over the wire. Note the key, once set, is process-global — every caller
+    the socket accepts is served with it. That is safe only because the server
+    binds loopback by default (see ``main``); if you set ``HOST=0.0.0.0`` or
+    ``ATHENA_ALLOW_BROWSER_KEY=1`` for a networked/multi-user deployment, add
+    request authentication — otherwise a LAN client can reuse the stored key.
+    """
+    return _client_is_loopback(request) or os.environ.get("ATHENA_ALLOW_BROWSER_KEY") == "1"
+
+
+def _maybe_switch_backend(
+    hdr_backend: str | None,
+    hdr_model: str | None,
+    hdr_api_key: str | None = None,
+    allow_key: bool = False,
+) -> None:
+    """Apply a per-request backend/model/key override (demo settings panel).
+
+    Absent headers leave the server default untouched. A changed selection (or a
+    changed, permitted API key) updates the env and drops the singleton so the
+    next request rebuilds the agent. The key is never logged.
     """
     global _agent
     valid = {b.value for b in Backend}
@@ -134,7 +173,11 @@ def _maybe_switch_backend(hdr_backend: str | None, hdr_model: str | None) -> Non
     cur_backend, cur_model = _current_backend()
     desired_backend = bk if bk in valid else cur_backend
     desired_model = bm if bk in valid else cur_model  # model only meaningful with a backend
-    if desired_backend == cur_backend and desired_model == cur_model:
+
+    key = (hdr_api_key or "").strip()
+    key_env = _BACKEND_KEY_ENV.get(desired_backend)
+    key_changed = bool(allow_key and key and key_env and os.environ.get(key_env) != key)
+    if desired_backend == cur_backend and desired_model == cur_model and not key_changed:
         return
     with _agent_lock:
         os.environ["ATHENA_BACKEND"] = desired_backend
@@ -142,11 +185,13 @@ def _maybe_switch_backend(hdr_backend: str | None, hdr_model: str | None) -> Non
             os.environ["ATHENA_BACKEND_MODEL"] = desired_model
         else:
             os.environ.pop("ATHENA_BACKEND_MODEL", None)
+        if key_changed and key_env:
+            os.environ[key_env] = key
         _agent = None  # rebuilt lazily on next get_agent()
 
 
 @app.get("/config")
-def get_config() -> dict:
+def get_config(request: Request) -> dict:
     """Current + available backends, for the demo's model switcher."""
     backend, model = _current_backend()
     return {
@@ -158,6 +203,10 @@ def get_config() -> dict:
             "claude": "claude-opus-4-8",
             "gemini": "gemini-2.5-pro",
         },
+        # Whether the browser may supply the API key for this caller, and which
+        # backends already have a server-side key (value never exposed).
+        "accepts_browser_key": _browser_key_allowed(request),
+        "key_set": {b: bool(os.environ.get(e)) for b, e in _BACKEND_KEY_ENV.items()},
     }
 
 
@@ -666,11 +715,15 @@ async def agui_endpoint(input_data: RunAgentInput, request: Request) -> Streamin
             ma = None
         multi_agent_requested = True if ma is None else bool(ma)
 
-    # Per-request backend/model selection from the demo's settings panel.
-    # Rebuilds the singleton agent only when the selection actually changes.
+    # Per-request backend/model/key selection from the demo's settings panel.
+    # Rebuilds the singleton agent only when the selection actually changes. The
+    # API key is honored only for loopback callers by default (see
+    # _browser_key_allowed).
     _maybe_switch_backend(
         request.headers.get("x-athena-backend"),
         request.headers.get("x-athena-backend-model"),
+        request.headers.get("x-athena-api-key"),
+        allow_key=_browser_key_allowed(request),
     )
 
     async def event_generator() -> AsyncIterator[str]:
@@ -759,9 +812,13 @@ async def report_endpoint(req: ReportRequest, request: Request):
 def main() -> None:
     import uvicorn
 
+    # Bind loopback by default: the demo accepts a browser-supplied API key that
+    # is stored process-global, so a public bind would let any LAN client reuse
+    # the local user's key via an unauthenticated POST. Set HOST=0.0.0.0 to
+    # expose it deliberately (add auth first).
     uvicorn.run(
         app,
-        host=os.environ.get("HOST", "0.0.0.0"),
+        host=os.environ.get("HOST", "127.0.0.1"),
         port=int(os.environ.get("AGUI_PORT", "8090")),
     )
 

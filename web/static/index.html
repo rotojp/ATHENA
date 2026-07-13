@@ -2793,9 +2793,14 @@
       </select>
       <input type="text" class="field-input" id="backend-model"
              placeholder="model id (optional, e.g. claude-opus-4-8)" style="margin-top:8px;" />
-      <div style="color:var(--on-surface-var); font-size:12px; margin-top:6px; line-height:1.4;">
-        API backends need a key on the server (ANTHROPIC_API_KEY / GEMINI_API_KEY).
-        Switching rebuilds the agent on your next question.
+      <input type="password" class="field-input" id="backend-key"
+             placeholder="API key (optional — stored in this browser)"
+             autocomplete="off" spellcheck="false" style="margin-top:8px;" />
+      <div id="backend-key-note" style="color:var(--on-surface-var); font-size:12px; margin-top:6px; line-height:1.4;">
+        The key is stored in this browser (localStorage) and sent only to your
+        local server, which accepts it over loopback. You can instead set
+        ANTHROPIC_API_KEY / GEMINI_API_KEY server-side. Switching rebuilds the
+        agent on your next question.
       </div>
     </div>
     <div class="config-section">
@@ -5043,9 +5048,10 @@ async function run() {
         // CallAgent (sub-agent dispatch) is enabled for this request.
         "X-Athena-Multi-Agent": (maToggleEl && maToggleEl.dataset.on === "1") ? "true" : "false",
         // Model backend selector (settings panel). The server rebuilds the
-        // agent when these change.
+        // agent when these change. The API key is honored on loopback only.
         "X-Athena-Backend": (backendSelectEl && backendSelectEl.value) || "athena",
         "X-Athena-Backend-Model": (backendModelEl && backendModelEl.value.trim()) || "",
+        "X-Athena-Api-Key": (backendKeyEl && backendKeyEl.value.trim()) || "",
       },
       body: JSON.stringify({
         threadId: "console-" + Math.random().toString(36).slice(2, 10),
@@ -5322,32 +5328,69 @@ function applyMAToggleState(on) {
    X-Athena-Backend / X-Athena-Backend-Model headers on every POST. On open,
    /config seeds the current server-side default (unless the user already
    chose one locally). */
-const backendSelectEl = document.getElementById("backend-select");
-const backendModelEl  = document.getElementById("backend-model");
+const backendSelectEl  = document.getElementById("backend-select");
+const backendModelEl   = document.getElementById("backend-model");
+const backendKeyEl     = document.getElementById("backend-key");
+const backendKeyNoteEl = document.getElementById("backend-key-note");
 const BK_KEY = "athena.backend";
 const BM_KEY = "athena.backendModel";
+const KEY_PREFIX = "athena.apiKey.";   // per-backend, stored in THIS browser only
+let acceptsBrowserKey = true;          // refined from /config
+
+function lsGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
+function lsSet(k, v) { try { localStorage.setItem(k, v); } catch { /* ignore */ } }
+
+function keyEnvName(bk) {
+  return bk === "gemini" ? "GEMINI_API_KEY" : bk === "gpt" ? "AZURE_API_KEY" : "ANTHROPIC_API_KEY";
+}
+
+/* Show the right key (per backend), hide it for the local model, and swap the
+   note when the server won't accept a browser key. */
+function refreshBackendKeyUI() {
+  if (!backendSelectEl || !backendKeyEl) return;
+  const bk = backendSelectEl.value;
+  const isLocal = bk === "athena";
+  const showField = !isLocal && acceptsBrowserKey;
+  backendKeyEl.style.display = showField ? "" : "none";
+  backendKeyEl.value = showField ? (lsGet(KEY_PREFIX + bk) || "") : "";
+  if (backendKeyNoteEl) {
+    backendKeyNoteEl.textContent = isLocal
+      ? "The local backend runs your served model — no API key needed."
+      : !acceptsBrowserKey
+        ? "This server won't accept a browser-supplied key (non-loopback). Set " +
+          keyEnvName(bk) + " server-side instead."
+        : "Key is stored in this browser and sent only to your local server (loopback), " +
+          "or set " + keyEnvName(bk) + " server-side. Switching rebuilds the agent on your next question.";
+  }
+}
+
 (function initBackendSelector() {
   if (!backendSelectEl || !backendModelEl) return;
-  let bk = null, bm = null;
-  try { bk = localStorage.getItem(BK_KEY); bm = localStorage.getItem(BM_KEY); } catch { /* private */ }
-  if (bk) backendSelectEl.value = bk;
-  if (bm) backendModelEl.value = bm;
-  // Seed from the server's current config when the user hasn't chosen locally.
-  if (!bk) {
-    fetch("/config").then(r => r.ok ? r.json() : null).then(cfg => {
-      if (!cfg) return;
-      if (backendSelectEl.value === "athena" && cfg.backend) backendSelectEl.value = cfg.backend;
-      if (!backendModelEl.value && cfg.backend_model) backendModelEl.value = cfg.backend_model;
-    }).catch(() => {});
-  }
+  const bk0 = lsGet(BK_KEY), bm0 = lsGet(BM_KEY);
+  if (bk0) backendSelectEl.value = bk0;
+  if (bm0) backendModelEl.value = bm0;
+  fetch("/config").then(r => r.ok ? r.json() : null).then(cfg => {
+    if (cfg) {
+      acceptsBrowserKey = !!cfg.accepts_browser_key;
+      if (!bk0 && backendSelectEl.value === "athena" && cfg.backend) backendSelectEl.value = cfg.backend;
+      if (!bm0 && !backendModelEl.value && cfg.backend_model) backendModelEl.value = cfg.backend_model;
+    }
+    refreshBackendKeyUI();
+  }).catch(() => refreshBackendKeyUI());
+
   backendSelectEl.addEventListener("change", () => {
-    try { localStorage.setItem(BK_KEY, backendSelectEl.value); } catch { /* ignore */ }
+    lsSet(BK_KEY, backendSelectEl.value);
+    refreshBackendKeyUI();
     const label = backendSelectEl.options[backendSelectEl.selectedIndex].text;
     snackbar("Backend → " + label + " (applies on next question)");
   });
-  backendModelEl.addEventListener("change", () => {
-    try { localStorage.setItem(BM_KEY, backendModelEl.value.trim()); } catch { /* ignore */ }
-  });
+  backendModelEl.addEventListener("change", () => lsSet(BM_KEY, backendModelEl.value.trim()));
+  if (backendKeyEl) {
+    backendKeyEl.addEventListener("change", () => {
+      const bk = backendSelectEl.value;
+      if (bk !== "athena") lsSet(KEY_PREFIX + bk, backendKeyEl.value.trim());
+    });
+  }
 })();
 
 /* ─── Run-status bar: stop + expand handlers.
