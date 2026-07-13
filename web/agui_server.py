@@ -185,7 +185,15 @@ async def _translate_to_agui(
 
     yield RunStartedEvent(thread_id=thread_id, run_id=run_id)
 
-    agent = get_agent()
+    # Lazy first-request init can fail (unreachable model server, bad config) and
+    # is blocking (loads the tokenizer). Offload it, and on failure emit a proper
+    # RunError + RunFinished instead of leaving the client on a dead stream.
+    try:
+        agent = await asyncio.get_running_loop().run_in_executor(None, get_agent)
+    except Exception as e:  # noqa: BLE001 — surface init failure to the client
+        yield RunErrorEvent(message=str(e))
+        yield RunFinishedEvent(thread_id=thread_id, run_id=run_id)
+        return
     # Track the active text-message bracket per agent_id so we can wrap
     # streaming reasoning into TextMessageStart / Content / End triplets.
     open_message_id: dict[str, str] = {}

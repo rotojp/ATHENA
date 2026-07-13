@@ -236,7 +236,6 @@ def _stream_response(req: ChatCompletionRequest, question: str):
     not as an abrupt mid-stream connection close after StreamingResponse
     has already flushed its headers.
     """
-    agent = get_agent()
     chat_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
     created = int(time.time())
     final_text = ""  # top-level answer text, captured for include_usage
@@ -269,6 +268,10 @@ def _stream_response(req: ChatCompletionRequest, question: str):
     yield chunk("", role="assistant")
 
     try:
+        # Keep lazy init inside the try so a first-request failure becomes an
+        # in-stream [error] chunk + [DONE], not a malformed stream (headers are
+        # already flushed by the time this generator runs).
+        agent = get_agent()
         for ev in agent.answer_streaming(
             question,
             temperature=req.temperature,
