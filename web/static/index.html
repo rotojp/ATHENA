@@ -2784,6 +2784,21 @@
       <input type="text" class="field-input" id="server" />
     </div>
     <div class="config-section">
+      <div class="field-label">Model backend</div>
+      <select class="field-input" id="backend-select">
+        <option value="athena">Local — ATHENA-R1 (vLLM/MLX)</option>
+        <option value="claude">Claude — Anthropic API</option>
+        <option value="gemini">Gemini — Google API</option>
+        <option value="gpt">GPT — Azure OpenAI</option>
+      </select>
+      <input type="text" class="field-input" id="backend-model"
+             placeholder="model id (optional, e.g. claude-opus-4-8)" style="margin-top:8px;" />
+      <div style="color:var(--on-surface-var); font-size:12px; margin-top:6px; line-height:1.4;">
+        API backends need a key on the server (ANTHROPIC_API_KEY / GEMINI_API_KEY).
+        Switching rebuilds the agent on your next question.
+      </div>
+    </div>
+    <div class="config-section">
       <div class="field-label">Configuration</div>
       <table class="config-table" id="config-table">
         <tbody><tr><td colspan="2" style="color:var(--on-surface-var); font-style:italic;">loading…</td></tr></tbody>
@@ -5027,6 +5042,10 @@ async function run() {
         // Multi-agent toggle — server reads this to decide whether
         // CallAgent (sub-agent dispatch) is enabled for this request.
         "X-Athena-Multi-Agent": (maToggleEl && maToggleEl.dataset.on === "1") ? "true" : "false",
+        // Model backend selector (settings panel). The server rebuilds the
+        // agent when these change.
+        "X-Athena-Backend": (backendSelectEl && backendSelectEl.value) || "athena",
+        "X-Athena-Backend-Model": (backendModelEl && backendModelEl.value.trim()) || "",
       },
       body: JSON.stringify({
         threadId: "console-" + Math.random().toString(36).slice(2, 10),
@@ -5296,6 +5315,38 @@ function applyMAToggleState(on) {
     applyMAToggleState(next);
     try { localStorage.setItem(MA_KEY, next ? "1" : "0"); } catch { /* ignore */ }
     snackbar(next ? "Multi-agent enabled" : "Multi-agent disabled — single-agent only");
+  });
+})();
+
+/* ─── Model backend selector: persists in localStorage, sent as
+   X-Athena-Backend / X-Athena-Backend-Model headers on every POST. On open,
+   /config seeds the current server-side default (unless the user already
+   chose one locally). */
+const backendSelectEl = document.getElementById("backend-select");
+const backendModelEl  = document.getElementById("backend-model");
+const BK_KEY = "athena.backend";
+const BM_KEY = "athena.backendModel";
+(function initBackendSelector() {
+  if (!backendSelectEl || !backendModelEl) return;
+  let bk = null, bm = null;
+  try { bk = localStorage.getItem(BK_KEY); bm = localStorage.getItem(BM_KEY); } catch { /* private */ }
+  if (bk) backendSelectEl.value = bk;
+  if (bm) backendModelEl.value = bm;
+  // Seed from the server's current config when the user hasn't chosen locally.
+  if (!bk) {
+    fetch("/config").then(r => r.ok ? r.json() : null).then(cfg => {
+      if (!cfg) return;
+      if (backendSelectEl.value === "athena" && cfg.backend) backendSelectEl.value = cfg.backend;
+      if (!backendModelEl.value && cfg.backend_model) backendModelEl.value = cfg.backend_model;
+    }).catch(() => {});
+  }
+  backendSelectEl.addEventListener("change", () => {
+    try { localStorage.setItem(BK_KEY, backendSelectEl.value); } catch { /* ignore */ }
+    const label = backendSelectEl.options[backendSelectEl.selectedIndex].text;
+    snackbar("Backend → " + label + " (applies on next question)");
+  });
+  backendModelEl.addEventListener("change", () => {
+    try { localStorage.setItem(BM_KEY, backendModelEl.value.trim()); } catch { /* ignore */ }
   });
 })();
 

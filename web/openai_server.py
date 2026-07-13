@@ -39,7 +39,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
-from athena_r1 import AthenaR1
+from athena_r1 import AthenaR1, Backend
 
 _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _messages import fold_messages_to_prompt as _fold_messages_to_prompt  # noqa: E402
@@ -154,14 +154,31 @@ def get_agent() -> AthenaR1:
         return _agent
     with _agent_lock:
         if _agent is None:
-            _agent = AthenaR1(
-                model=os.environ.get("ATHENA_MODEL_PATH", "mims-harvard/ATHENA-R1-Qwen3-8B"),
-                vllm_url=os.environ.get("VLLM_URL", "http://127.0.0.1:8000/v1"),
-                tool_server=os.environ.get("TOOLUNIVERSE_API", "http://127.0.0.1:8080"),
-            )
+            _agent = AthenaR1(**_agent_kwargs())
         if not getattr(_agent, "_initialized", True):
             _agent.init()
     return _agent
+
+
+def _agent_kwargs() -> dict:
+    """Build AthenaR1 kwargs from env, honoring the selected backend.
+
+    ``ATHENA_BACKEND`` picks athena (local, default) | gpt | claude | gemini;
+    ``ATHENA_BACKEND_MODEL`` overrides the backend's model id. Only the local
+    backend needs a served model + vLLM endpoint.
+    """
+    valid = {b.value for b in Backend}
+    backend_name = os.environ.get("ATHENA_BACKEND", "athena").strip().lower()
+    backend = Backend(backend_name) if backend_name in valid else Backend.ATHENA
+    kwargs: dict = {
+        "backend": backend,
+        "backend_model": os.environ.get("ATHENA_BACKEND_MODEL") or None,
+        "tool_server": os.environ.get("TOOLUNIVERSE_API", "http://127.0.0.1:8080"),
+    }
+    if backend == Backend.ATHENA:
+        kwargs["model"] = os.environ.get("ATHENA_MODEL_PATH", "mims-harvard/ATHENA-R1-Qwen3-8B")
+        kwargs["vllm_url"] = os.environ.get("VLLM_URL", "http://127.0.0.1:8000/v1")
+    return kwargs
 
 
 @app.on_event("startup")

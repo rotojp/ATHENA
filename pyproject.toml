@@ -35,6 +35,9 @@ dependencies = [
 
 [project.optional-dependencies]
 vllm = ["vllm>=0.6"]
+# API backends: `anthropic` for Backend.CLAUDE. Gemini/GPT reuse the `openai`
+# core dep against their OpenAI-compatible endpoints, so need nothing extra.
+api = ["anthropic>=0.40"]
 web = [
     "fastapi>=0.100",
     "uvicorn[standard]>=0.20",

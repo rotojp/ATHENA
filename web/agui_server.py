@@ -46,7 +46,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from athena_r1 import AthenaR1
+from athena_r1 import AthenaR1, Backend
 
 _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _messages import fold_messages_to_prompt as _fold_messages_to_prompt  # noqa: E402
@@ -82,24 +82,83 @@ def get_agent() -> AthenaR1:
         return _agent
     with _agent_lock:
         if _agent is None:
-            _agent = AthenaR1(
-                model=os.environ.get("ATHENA_MODEL_PATH", "mims-harvard/ATHENA-R1-Qwen3-8B"),
-                vllm_url=os.environ.get("VLLM_URL", "http://127.0.0.1:8000/v1"),
-                tool_server=os.environ.get("TOOLUNIVERSE_API", "http://127.0.0.1:8080"),
-                # Default 1: the Multi-agent toggle has effect out-of-box
-                # (main can dispatch sub-agents) WITHOUT the explosive
-                # grandchild nesting that level=2 produces. Live testing
-                # showed level=2 spawning ~25 agents (7 top-level subs ×
-                # 4-8 grandchildren) for a single comparison question — a
-                # >10-minute run that's a poor demo experience. level=1
-                # keeps a clean, snappy main→subs tree. Set
-                # ATHENA_MAX_AGENT_LEVEL=2 for deeper nesting, or =0 to
-                # force single-agent regardless of the UI toggle.
-                max_agent_level=int(os.environ.get("ATHENA_MAX_AGENT_LEVEL", "1")),
-            )
+            _agent = AthenaR1(**_agent_kwargs())
         if not getattr(_agent, "_initialized", True):
             _agent.init()
     return _agent
+
+
+def _agent_kwargs() -> dict:
+    """Build AthenaR1 kwargs from env, honoring the selected backend.
+
+    ``ATHENA_BACKEND`` picks athena (local, default) | gpt | claude | gemini;
+    ``ATHENA_BACKEND_MODEL`` overrides the backend's model id. Only the local
+    backend needs a served model + vLLM endpoint.
+    """
+    valid = {b.value for b in Backend}
+    backend_name = os.environ.get("ATHENA_BACKEND", "athena").strip().lower()
+    backend = Backend(backend_name) if backend_name in valid else Backend.ATHENA
+    kwargs: dict = {
+        "backend": backend,
+        "backend_model": os.environ.get("ATHENA_BACKEND_MODEL") or None,
+        "tool_server": os.environ.get("TOOLUNIVERSE_API", "http://127.0.0.1:8080"),
+        # Default 1: the Multi-agent toggle has effect out-of-box (main can
+        # dispatch sub-agents) WITHOUT the explosive grandchild nesting that
+        # level=2 produces. Set ATHENA_MAX_AGENT_LEVEL=2 for deeper nesting, or
+        # =0 to force single-agent regardless of the UI toggle.
+        "max_agent_level": int(os.environ.get("ATHENA_MAX_AGENT_LEVEL", "1")),
+    }
+    if backend == Backend.ATHENA:
+        kwargs["model"] = os.environ.get("ATHENA_MODEL_PATH", "mims-harvard/ATHENA-R1-Qwen3-8B")
+        kwargs["vllm_url"] = os.environ.get("VLLM_URL", "http://127.0.0.1:8000/v1")
+    return kwargs
+
+
+def _current_backend() -> tuple[str, str]:
+    """(backend, model) currently configured via env."""
+    backend = (os.environ.get("ATHENA_BACKEND", "athena") or "athena").strip().lower()
+    model = os.environ.get("ATHENA_BACKEND_MODEL", "") or ""
+    return backend, model
+
+
+def _maybe_switch_backend(hdr_backend: str | None, hdr_model: str | None) -> None:
+    """Apply a per-request backend/model override (demo settings panel).
+
+    Absent headers leave the server default untouched. A changed selection sets
+    the env and drops the singleton so the next request rebuilds the agent.
+    """
+    global _agent
+    valid = {b.value for b in Backend}
+    bk = (hdr_backend or "").strip().lower()
+    bm = (hdr_model or "").strip()
+    cur_backend, cur_model = _current_backend()
+    desired_backend = bk if bk in valid else cur_backend
+    desired_model = bm if bk in valid else cur_model  # model only meaningful with a backend
+    if desired_backend == cur_backend and desired_model == cur_model:
+        return
+    with _agent_lock:
+        os.environ["ATHENA_BACKEND"] = desired_backend
+        if desired_model:
+            os.environ["ATHENA_BACKEND_MODEL"] = desired_model
+        else:
+            os.environ.pop("ATHENA_BACKEND_MODEL", None)
+        _agent = None  # rebuilt lazily on next get_agent()
+
+
+@app.get("/config")
+def get_config() -> dict:
+    """Current + available backends, for the demo's model switcher."""
+    backend, model = _current_backend()
+    return {
+        "backend": backend,
+        "backend_model": model,
+        "available": [b.value for b in Backend],
+        "default_models": {
+            "gpt": "gpt-5",
+            "claude": "claude-opus-4-8",
+            "gemini": "gemini-2.5-pro",
+        },
+    }
 
 
 @app.on_event("startup")
@@ -606,6 +665,13 @@ async def agui_endpoint(input_data: RunAgentInput, request: Request) -> Streamin
         else:
             ma = None
         multi_agent_requested = True if ma is None else bool(ma)
+
+    # Per-request backend/model selection from the demo's settings panel.
+    # Rebuilds the singleton agent only when the selection actually changes.
+    _maybe_switch_backend(
+        request.headers.get("x-athena-backend"),
+        request.headers.get("x-athena-backend-model"),
+    )
 
     async def event_generator() -> AsyncIterator[str]:
         if not question:
