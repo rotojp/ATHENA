@@ -38,6 +38,8 @@ class Backend(str, Enum):
 
     ATHENA = "athena"
     GPT = "gpt"
+    CLAUDE = "claude"
+    GEMINI = "gemini"
 
 
 @dataclass
@@ -143,9 +145,12 @@ class AthenaR1:
         tool_server: str | None = None,
         backend: Backend = Backend.ATHENA,
         nested_backend: Backend | None = None,
+        backend_model: str | None = None,
         azure_endpoint: str | None = None,
         azure_api_key: str | None = None,
         azure_api_version: str = "2024-12-01-preview",
+        anthropic_api_key: str | None = None,
+        gemini_api_key: str | None = None,
         rag_model: str = "mims-harvard/ToolRAG-T1-GTE-Qwen2-1.5B",
         tool_categories: list[str] | None = None,
         max_round: int = 40,
@@ -163,23 +168,38 @@ class AthenaR1:
 
         Args:
             model: HuggingFace model id or local path of the ATHENA-R1 model
-                weights. Required unless `backend=Backend.GPT`.
-            vllm_url: URL of the vLLM OpenAI-compatible chat completion endpoint
-                serving the model. Required unless `backend=Backend.GPT`.
-                Example: ``http://0.0.0.0:8000/v1``.
+                weights. Required for `backend=Backend.ATHENA`; ignored by the
+                API backends (GPT/Claude/Gemini).
+            vllm_url: URL of the vLLM/MLX OpenAI-compatible chat completion
+                endpoint serving the model. Required for `backend=Backend.ATHENA`;
+                ignored by the API backends. Example: ``http://127.0.0.1:8000/v1``.
             tool_server: URL of a ToolUniverse HTTP server. Recommended for
                 multi-process deployments. If None, ToolUniverse is loaded
                 in-process (uses ~15GB RAM).
             backend: Which LLM provides Stage-1 reasoning. ``ATHENA`` (default)
-                routes through the local vLLM-served model; ``GPT`` routes
-                through Azure OpenAI.
+                routes through the local vLLM/MLX-served model; ``GPT`` routes
+                through Azure OpenAI; ``CLAUDE`` routes through the Anthropic API
+                (official SDK); ``GEMINI`` routes through Google's
+                OpenAI-compatible endpoint. The API backends are drop-in
+                alternatives to the local model — useful when you don't want to
+                serve weights locally.
             nested_backend: Backend used by call_agent sub-agents (level >= 1).
                 Defaults to the same as `backend`.
+            backend_model: Model id for the chosen ``backend``. Lets you change
+                the LLM without code edits, e.g. ``"claude-opus-4-8"``,
+                ``"claude-sonnet-5"``, or ``"gemini-2.5-pro"``. Defaults per
+                backend (GPT: ``gpt-5``, Claude: ``claude-opus-4-8``, Gemini:
+                ``gemini-2.5-pro``). Ignored for ``ATHENA`` (uses ``model``).
             azure_endpoint: Azure OpenAI endpoint URL. Required if `backend=GPT`
                 or if you intend to use `map_to_option(backend="gpt")`.
             azure_api_key: Azure OpenAI API key. Falls back to environment
                 variable ``AZURE_API_KEY`` if None.
             azure_api_version: Azure OpenAI API version string.
+            anthropic_api_key: Anthropic API key for ``backend=CLAUDE``. Falls
+                back to ``ANTHROPIC_API_KEY`` (or an ``ant auth`` profile) if
+                None.
+            gemini_api_key: Google AI Studio key for ``backend=GEMINI``. Falls
+                back to ``GEMINI_API_KEY`` if None.
             rag_model: HuggingFace id of the ToolRAG retrieval model.
             tool_categories: List of ToolUniverse categories to load. Defaults
                 to the paper-canonical set (tool_finder, opentarget,
@@ -222,6 +242,14 @@ class AthenaR1:
             raise ValueError(
                 "Backend.GPT requires `azure_endpoint=...` (or the AZURE_OPENAI_ENDPOINT env var)."
             )
+        # Gemini's OpenAI-compatible endpoint needs a key (no profile fallback).
+        # Claude is validated lazily — the Anthropic SDK also resolves an
+        # `ant auth` profile, so an unset ANTHROPIC_API_KEY is not necessarily
+        # missing credentials; a clear error surfaces at first Claude call.
+        if backend == Backend.GEMINI and not (gemini_api_key or os.environ.get("GEMINI_API_KEY")):
+            raise ValueError(
+                "Backend.GEMINI requires `gemini_api_key=...` (or the GEMINI_API_KEY env var)."
+            )
         if max_round <= 0:
             raise ValueError(f"max_round must be > 0, got {max_round}")
         if not 0.0 <= presence_penalty <= 2.0:
@@ -234,6 +262,12 @@ class AthenaR1:
             os.environ["AZURE_API_KEY"] = azure_api_key
         os.environ.setdefault("AZURE_OPENAI_API_VERSION", azure_api_version)
 
+        # Anthropic / Gemini keys likewise reach the engine via env vars.
+        if anthropic_api_key is not None:
+            os.environ["ANTHROPIC_API_KEY"] = anthropic_api_key
+        if gemini_api_key is not None:
+            os.environ["GEMINI_API_KEY"] = gemini_api_key
+
         # `presence_penalty` is consumed inside the core engine via the
         # INFER_PRESENCE_PENALTY env var (see _core.llm_infer).
         # 0.0 is the paper default ("no presence penalty").
@@ -243,6 +277,12 @@ class AthenaR1:
         backend_by_level: dict[int, str] = {0: backend_default}
         if nested_backend is not None:
             backend_by_level[1] = nested_backend.value
+
+        # Per-backend model override. `backend_model` sets the model for the
+        # primary backend; the engine keeps sensible defaults for the rest.
+        backend_models: dict[str, str] = {}
+        if backend_model is not None:
+            backend_models[backend_default] = backend_model
 
         # Canonical paper-matching set of tool categories. Override via
         # `tool_categories` if you want a different subset.
@@ -275,6 +315,7 @@ class AthenaR1:
             max_token=max_token,
             backend_default=backend_default,
             backend_by_level=backend_by_level,
+            backend_models=backend_models,
             **kwargs,
         )
         # Override hardcoded depth in _core: when max_agent_level > 0,

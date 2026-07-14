@@ -6,8 +6,9 @@ agent-chat-ui, LangGraph Studio, …) can connect without code changes.
 
 Run:
     python web/agui_server.py
-    # → POST  http://0.0.0.0:8090/    (AG-UI endpoint)
-    # → GET   http://0.0.0.0:8090/health
+    # → POST  http://127.0.0.1:8090/    (AG-UI endpoint)
+    # → GET   http://127.0.0.1:8090/health
+    # Binds loopback by default; set HOST=0.0.0.0 to expose (add auth first).
 
 Spec: https://docs.ag-ui.com/concepts/events
 """
@@ -46,7 +47,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from athena_r1 import AthenaR1
+from athena_r1 import AthenaR1, Backend
 
 _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _messages import fold_messages_to_prompt as _fold_messages_to_prompt  # noqa: E402
@@ -82,24 +83,131 @@ def get_agent() -> AthenaR1:
         return _agent
     with _agent_lock:
         if _agent is None:
-            _agent = AthenaR1(
-                model=os.environ.get("ATHENA_MODEL_PATH", "mims-harvard/ATHENA-R1-Qwen3-8B"),
-                vllm_url=os.environ.get("VLLM_URL", "http://127.0.0.1:8000/v1"),
-                tool_server=os.environ.get("TOOLUNIVERSE_API", "http://127.0.0.1:8080"),
-                # Default 1: the Multi-agent toggle has effect out-of-box
-                # (main can dispatch sub-agents) WITHOUT the explosive
-                # grandchild nesting that level=2 produces. Live testing
-                # showed level=2 spawning ~25 agents (7 top-level subs ×
-                # 4-8 grandchildren) for a single comparison question — a
-                # >10-minute run that's a poor demo experience. level=1
-                # keeps a clean, snappy main→subs tree. Set
-                # ATHENA_MAX_AGENT_LEVEL=2 for deeper nesting, or =0 to
-                # force single-agent regardless of the UI toggle.
-                max_agent_level=int(os.environ.get("ATHENA_MAX_AGENT_LEVEL", "1")),
-            )
+            _agent = AthenaR1(**_agent_kwargs())
         if not getattr(_agent, "_initialized", True):
             _agent.init()
     return _agent
+
+
+def _agent_kwargs() -> dict:
+    """Build AthenaR1 kwargs from env, honoring the selected backend.
+
+    ``ATHENA_BACKEND`` picks athena (local, default) | gpt | claude | gemini;
+    ``ATHENA_BACKEND_MODEL`` overrides the backend's model id. Only the local
+    backend needs a served model + vLLM endpoint.
+    """
+    valid = {b.value for b in Backend}
+    backend_name = os.environ.get("ATHENA_BACKEND", "athena").strip().lower()
+    backend = Backend(backend_name) if backend_name in valid else Backend.ATHENA
+    kwargs: dict = {
+        "backend": backend,
+        "backend_model": os.environ.get("ATHENA_BACKEND_MODEL") or None,
+        "tool_server": os.environ.get("TOOLUNIVERSE_API", "http://127.0.0.1:8080"),
+        # Default 1: the Multi-agent toggle has effect out-of-box (main can
+        # dispatch sub-agents) WITHOUT the explosive grandchild nesting that
+        # level=2 produces. Set ATHENA_MAX_AGENT_LEVEL=2 for deeper nesting, or
+        # =0 to force single-agent regardless of the UI toggle.
+        "max_agent_level": int(os.environ.get("ATHENA_MAX_AGENT_LEVEL", "1")),
+    }
+    if backend == Backend.ATHENA:
+        kwargs["model"] = os.environ.get("ATHENA_MODEL_PATH", "mims-harvard/ATHENA-R1-Qwen3-8B")
+        kwargs["vllm_url"] = os.environ.get("VLLM_URL", "http://127.0.0.1:8000/v1")
+    return kwargs
+
+
+def _current_backend() -> tuple[str, str]:
+    """(backend, model) currently configured via env."""
+    backend = (os.environ.get("ATHENA_BACKEND", "athena") or "athena").strip().lower()
+    model = os.environ.get("ATHENA_BACKEND_MODEL", "") or ""
+    return backend, model
+
+
+# Which env var holds each backend's API key.
+_BACKEND_KEY_ENV = {
+    "claude": "ANTHROPIC_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "gpt": "AZURE_API_KEY",
+}
+
+
+def _client_is_loopback(request: Request) -> bool:
+    """True iff the request's socket peer is loopback.
+
+    Uses the real transport peer address (``request.client.host``), NOT any
+    forwarding header — those are attacker-controlled and must never gate a
+    security decision.
+    """
+    host = (request.client.host if request.client else "") or ""
+    return host in ("127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost")
+
+
+def _browser_key_allowed(request: Request) -> bool:
+    """Whether a browser-supplied API key will be honored for this request.
+
+    Safe by default: only loopback callers (the bundled local demo) may SET a
+    key over the wire. Note the key, once set, is process-global — every caller
+    the socket accepts is served with it. That is safe only because the server
+    binds loopback by default (see ``main``); if you set ``HOST=0.0.0.0`` or
+    ``ATHENA_ALLOW_BROWSER_KEY=1`` for a networked/multi-user deployment, add
+    request authentication — otherwise a LAN client can reuse the stored key.
+    """
+    return _client_is_loopback(request) or os.environ.get("ATHENA_ALLOW_BROWSER_KEY") == "1"
+
+
+def _maybe_switch_backend(
+    hdr_backend: str | None,
+    hdr_model: str | None,
+    hdr_api_key: str | None = None,
+    allow_key: bool = False,
+) -> None:
+    """Apply a per-request backend/model/key override (demo settings panel).
+
+    Absent headers leave the server default untouched. A changed selection (or a
+    changed, permitted API key) updates the env and drops the singleton so the
+    next request rebuilds the agent. The key is never logged.
+    """
+    global _agent
+    valid = {b.value for b in Backend}
+    bk = (hdr_backend or "").strip().lower()
+    bm = (hdr_model or "").strip()
+    cur_backend, cur_model = _current_backend()
+    desired_backend = bk if bk in valid else cur_backend
+    desired_model = bm if bk in valid else cur_model  # model only meaningful with a backend
+
+    key = (hdr_api_key or "").strip()
+    key_env = _BACKEND_KEY_ENV.get(desired_backend)
+    key_changed = bool(allow_key and key and key_env and os.environ.get(key_env) != key)
+    if desired_backend == cur_backend and desired_model == cur_model and not key_changed:
+        return
+    with _agent_lock:
+        os.environ["ATHENA_BACKEND"] = desired_backend
+        if desired_model:
+            os.environ["ATHENA_BACKEND_MODEL"] = desired_model
+        else:
+            os.environ.pop("ATHENA_BACKEND_MODEL", None)
+        if key_changed and key_env:
+            os.environ[key_env] = key
+        _agent = None  # rebuilt lazily on next get_agent()
+
+
+@app.get("/config")
+def get_config(request: Request) -> dict:
+    """Current + available backends, for the demo's model switcher."""
+    backend, model = _current_backend()
+    return {
+        "backend": backend,
+        "backend_model": model,
+        "available": [b.value for b in Backend],
+        "default_models": {
+            "gpt": "gpt-5",
+            "claude": "claude-opus-4-8",
+            "gemini": "gemini-2.5-pro",
+        },
+        # Whether the browser may supply the API key for this caller, and which
+        # backends already have a server-side key (value never exposed).
+        "accepts_browser_key": _browser_key_allowed(request),
+        "key_set": {b: bool(os.environ.get(e)) for b, e in _BACKEND_KEY_ENV.items()},
+    }
 
 
 @app.on_event("startup")
@@ -185,7 +293,15 @@ async def _translate_to_agui(
 
     yield RunStartedEvent(thread_id=thread_id, run_id=run_id)
 
-    agent = get_agent()
+    # Lazy first-request init can fail (unreachable model server, bad config) and
+    # is blocking (loads the tokenizer). Offload it, and on failure emit a proper
+    # RunError + RunFinished instead of leaving the client on a dead stream.
+    try:
+        agent = await asyncio.get_running_loop().run_in_executor(None, get_agent)
+    except Exception as e:  # noqa: BLE001 — surface init failure to the client
+        yield RunErrorEvent(message=str(e))
+        yield RunFinishedEvent(thread_id=thread_id, run_id=run_id)
+        return
     # Track the active text-message bracket per agent_id so we can wrap
     # streaming reasoning into TextMessageStart / Content / End triplets.
     open_message_id: dict[str, str] = {}
@@ -599,6 +715,17 @@ async def agui_endpoint(input_data: RunAgentInput, request: Request) -> Streamin
             ma = None
         multi_agent_requested = True if ma is None else bool(ma)
 
+    # Per-request backend/model/key selection from the demo's settings panel.
+    # Rebuilds the singleton agent only when the selection actually changes. The
+    # API key is honored only for loopback callers by default (see
+    # _browser_key_allowed).
+    _maybe_switch_backend(
+        request.headers.get("x-athena-backend"),
+        request.headers.get("x-athena-backend-model"),
+        request.headers.get("x-athena-api-key"),
+        allow_key=_browser_key_allowed(request),
+    )
+
     async def event_generator() -> AsyncIterator[str]:
         if not question:
             yield encoder.encode(RunStartedEvent(thread_id=thread_id, run_id=run_id))
@@ -685,9 +812,13 @@ async def report_endpoint(req: ReportRequest, request: Request):
 def main() -> None:
     import uvicorn
 
+    # Bind loopback by default: the demo accepts a browser-supplied API key that
+    # is stored process-global, so a public bind would let any LAN client reuse
+    # the local user's key via an unauthenticated POST. Set HOST=0.0.0.0 to
+    # expose it deliberately (add auth first).
     uvicorn.run(
         app,
-        host=os.environ.get("HOST", "0.0.0.0"),
+        host=os.environ.get("HOST", "127.0.0.1"),
         port=int(os.environ.get("AGUI_PORT", "8090")),
     )
 

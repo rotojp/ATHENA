@@ -26,14 +26,25 @@ from ._version import __version__
 def _make_agent():
     # Lazy import — keeps ``athena-r1 --help`` snappy by deferring the heavy
     # transformers / tooluniverse import chain until we actually need the agent.
-    from .agent import AthenaR1
+    from .agent import AthenaR1, Backend
 
-    return AthenaR1(
-        model=os.environ.get("ATHENA_MODEL_PATH", "mims-harvard/ATHENA-R1-Qwen3-8B"),
-        vllm_url=os.environ.get("VLLM_URL", "http://127.0.0.1:8000/v1"),
-        tool_server=os.environ.get("TOOLUNIVERSE_API", "http://127.0.0.1:8080"),
-        max_agent_level=int(os.environ.get("ATHENA_MAX_AGENT_LEVEL", "0")),
-    )
+    valid = {b.value for b in Backend}
+    backend_name = os.environ.get("ATHENA_BACKEND", "athena").strip().lower()
+    backend = Backend(backend_name) if backend_name in valid else Backend.ATHENA
+    backend_model = os.environ.get("ATHENA_BACKEND_MODEL") or None
+
+    kwargs: dict[str, Any] = {
+        "backend": backend,
+        "backend_model": backend_model,
+        "tool_server": os.environ.get("TOOLUNIVERSE_API", "http://127.0.0.1:8080"),
+        "max_agent_level": int(os.environ.get("ATHENA_MAX_AGENT_LEVEL", "0")),
+    }
+    # Only the local backend needs a served model + vLLM endpoint; the API
+    # backends (Claude/Gemini/GPT) use their own credentials.
+    if backend == Backend.ATHENA:
+        kwargs["model"] = os.environ.get("ATHENA_MODEL_PATH", "mims-harvard/ATHENA-R1-Qwen3-8B")
+        kwargs["vllm_url"] = os.environ.get("VLLM_URL", "http://127.0.0.1:8000/v1")
+    return AthenaR1(**kwargs)
 
 
 def cmd_summary() -> int:
@@ -50,13 +61,19 @@ def cmd_summary() -> int:
     print("  --timeout SEC          wall-clock cap for `ask`")
     print("  --temperature FLOAT    sampling temperature for `ask` (default 0.7)")
     print("  --max-round INT        override agent's max_round for `ask`")
+    print("  --backend NAME         athena | gpt | claude | gemini (default athena)")
+    print("  --backend-model ID     model id for the backend (e.g. claude-opus-4-8)")
     print("  -V, --version          print version string and exit")
     print()
     print("Environment overrides:")
-    print("  ATHENA_MODEL_PATH    HF id / local path of the model")
+    print("  ATHENA_MODEL_PATH    HF id / local path of the model (athena backend)")
     print("  VLLM_URL             vLLM endpoint (default http://127.0.0.1:8000/v1)")
     print("  TOOLUNIVERSE_API     ToolUniverse endpoint (default http://127.0.0.1:8080)")
-    print("  AZURE_API_KEY        only needed for Backend.GPT")
+    print("  ATHENA_BACKEND       athena | gpt | claude | gemini")
+    print("  ATHENA_BACKEND_MODEL model id for the chosen backend")
+    print("  ANTHROPIC_API_KEY    only for Backend.CLAUDE (or an `ant auth` profile)")
+    print("  GEMINI_API_KEY       only for Backend.GEMINI")
+    print("  AZURE_API_KEY        only for Backend.GPT")
     return 0
 
 
@@ -93,9 +110,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=float, default=None)
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--max-round", type=int, default=None)
+    parser.add_argument(
+        "--backend", default=None, help="LLM backend: athena | gpt | claude | gemini"
+    )
+    parser.add_argument(
+        "--backend-model",
+        default=None,
+        help="Model id for the chosen backend (e.g. claude-opus-4-8, gemini-2.5-pro)",
+    )
     parser.add_argument("-h", "--help", action="store_true")
     parser.add_argument("-V", "--version", action="store_true")
     args = parser.parse_args(argv)
+
+    # CLI flags override the env for the agent factory.
+    if args.backend:
+        os.environ["ATHENA_BACKEND"] = args.backend
+    if args.backend_model:
+        os.environ["ATHENA_BACKEND_MODEL"] = args.backend_model
 
     if args.version:
         print(__version__)

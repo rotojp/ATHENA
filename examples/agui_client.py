@@ -14,7 +14,7 @@ import sys
 
 import requests
 
-AGUI_URL = os.environ.get("AGUI_URL", "http://0.0.0.0:8090")
+AGUI_URL = os.environ.get("AGUI_URL", "http://127.0.0.1:8090")
 
 
 def run_question(question: str) -> None:

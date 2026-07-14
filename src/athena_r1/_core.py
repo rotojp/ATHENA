@@ -260,7 +260,7 @@ class AgentRunContext:
             if self.conversation and self.conversation[0].get('role') == 'system':
                 new_conversation.append(self.conversation[0])
             else:
-                if backend == 'gpt':
+                if backend != 'athena':
                     new_conversation = self.agent.set_system_prompt(new_conversation, self.agent.gpt_planning_prompt)
                 else:
                     new_conversation = self.agent.set_system_prompt(new_conversation, self.agent.prompt_multi_step)
@@ -418,6 +418,7 @@ class AthenaCore:
                  keep_full_history=False,
                  backend_by_level: Optional[Dict[int, str]] = None,
                  backend_default: str = "athena",
+                 backend_models: Optional[Dict[str, str]] = None,
                  max_agent_level: Optional[int] = None,
                  summary_format_vllm_server_url=None,
                  summary_format_model_name=None,
@@ -463,6 +464,14 @@ class AthenaCore:
         # Backend selection config
         self.backend_default = backend_default
         self.backend_by_level = dict(backend_by_level or {})
+        # Model id per external (non-local) backend. Callers override individual
+        # entries via `backend_models`; the rest keep these defaults.
+        self.backend_models = {
+            "gpt": "gpt-5",
+            "claude": "claude-opus-4-8",
+            "gemini": "gemini-2.5-pro",
+        }
+        self.backend_models.update(backend_models or {})
         self.summary_format_vllm_server_url = summary_format_vllm_server_url
         self.summary_format_model_name = summary_format_model_name
         self.summary_format_args = summary_format_args or {
@@ -481,6 +490,9 @@ class AthenaCore:
         # does) would be hostile. We retain the env-var resolution here but
         # defer the actual client object to a property.
         self._gpt_client_obj: Optional[AzureOpenAI] = None
+        # Anthropic (Claude) + Gemini clients, likewise lazy.
+        self._claude_client_obj = None
+        self._gemini_client_obj: Optional[OpenAI] = None
 
     @property
     def gpt_client(self) -> AzureOpenAI:
@@ -518,6 +530,47 @@ class AthenaCore:
             )
         return self._gpt_client_obj
 
+    @property
+    def claude_client(self):
+        """Lazy Anthropic client for ``Backend.CLAUDE``.
+
+        The Anthropic SDK resolves credentials from ``ANTHROPIC_API_KEY`` or an
+        ``ant auth`` profile, so we don't pre-check a key here — a clear error
+        surfaces on first use if none is configured. ``anthropic`` is imported
+        lazily so the other backends don't require it installed.
+        """
+        if self._claude_client_obj is None:
+            try:
+                import anthropic
+            except ImportError as exc:
+                raise RuntimeError(
+                    "Backend.CLAUDE needs the `anthropic` package. Install it "
+                    'with `pip install "athena-r1[api]"` or `pip install anthropic`.'
+                ) from exc
+            self._claude_client_obj = anthropic.Anthropic()
+        return self._claude_client_obj
+
+    @property
+    def gemini_client(self) -> OpenAI:
+        """Lazy client for ``Backend.GEMINI`` via Google's OpenAI-compatible API.
+
+        Uses the same ``openai`` client ATHENA already depends on, pointed at
+        Google's endpoint. Override the base URL with ``GEMINI_BASE_URL``.
+        """
+        if self._gemini_client_obj is None:
+            api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+            if not api_key:
+                raise RuntimeError(
+                    "Backend.GEMINI requires a `GEMINI_API_KEY` environment "
+                    "variable (Google AI Studio key)."
+                )
+            base_url = os.getenv(
+                "GEMINI_BASE_URL",
+                "https://generativelanguage.googleapis.com/v1beta/openai/",
+            )
+            self._gemini_client_obj = OpenAI(api_key=api_key, base_url=base_url)
+        return self._gemini_client_obj
+
     def init_model(self, tool_type: List[str]) -> None:
         """Load ToolUniverse + the vLLM client. Idempotent — call once."""
         self.load_tooluniverse(tool_type)
@@ -531,6 +584,19 @@ class AthenaCore:
 
         if self.max_token is None:
             self.max_token = 40960
+
+        # External API backends (Claude/Gemini/GPT) serve no local weights and
+        # pass model_name=None. Skip the vLLM client + tokenizer load entirely —
+        # those are only used by the local (Backend.ATHENA) path.
+        if self.model_name is None:
+            logger.info(
+                "No local model_name set — skipping vLLM/tokenizer load "
+                "(external API backend)."
+            )
+            self.model = None
+            self.tokenizer = None
+            self.chat_template = None
+            return
 
         if not self.vllm_server_url.endswith('/v1'):
             self.vllm_server_url = f"{self.vllm_server_url.rstrip('/')}/v1"
@@ -701,7 +767,7 @@ class AthenaCore:
         else:
             conversation = []
             backend = self._get_backend_for_level(call_agent_level)
-            if backend == "gpt":
+            if backend != "athena":
                 sys_prompt = self.gpt_planning_prompt
             else:
                 sys_prompt = self.prompt_multi_step
@@ -1090,8 +1156,14 @@ class AthenaCore:
                       temperature: float = 1.0,
                       tools: Any = None,
                       max_new_tokens: int = 8192,
-                      top_p: float = 1.0) -> str:
-        """GPT backend inference."""
+                      top_p: float = 1.0,
+                      backend: str = "gpt") -> str:
+        """OpenAI-compatible chat backend inference (GPT via Azure, or Gemini).
+
+        Tools are serialized into the system prompt (the ATHENA-R1 prompt
+        protocol), and any native ``tool_calls`` the model returns are converted
+        to ``<tool_call>`` strings so the round loop parses them uniformly.
+        """
         # Convert conversation for GPT
         gpt_messages = self._convert_conversation_for_gpt(messages)
         gpt_messages_wo_system = [m for m in gpt_messages if m.get("role") != "system"]
@@ -1105,14 +1177,16 @@ class AthenaCore:
 
         request_messages = [{"role": "system", "content": system_prompt}] + gpt_messages_wo_system
 
-        responses = self.gpt_client.chat.completions.create(
-            model="gpt-5",
+        client = self.gemini_client if backend == "gemini" else self.gpt_client
+        model = self.backend_models.get(backend, "gpt-5")
+        responses = client.chat.completions.create(
+            model=model,
             messages=request_messages,
         )
         msg = responses.choices[0].message
         raw_content = msg.content
         answer = (raw_content or "").strip()
-        logger.info(f"GPT: {answer}")
+        logger.info(f"{backend}: {answer}")
 
         # Convert OpenAI tool_calls schema to the ATHENA-R1 <tool_call> string format.
         try:
@@ -1149,6 +1223,54 @@ class AthenaCore:
                     return f"{prefix}\n" + "\n".join(blocks)
                 return "\n".join(blocks)
 
+        return answer
+
+    def claude_llm_infer(self, messages: List[Dict[str, Any]],
+                         temperature: float = 1.0,
+                         tools: Any = None,
+                         max_new_tokens: int = 8192,
+                         top_p: float = 1.0) -> str:
+        """Claude backend inference via the official Anthropic SDK.
+
+        Mirrors :meth:`gpt_llm_infer`: the tool set is serialized into the
+        system prompt (the ATHENA-R1 prompt protocol) and Claude — a strong
+        instruction follower — emits ``<tool_call>`` blocks in its text, which
+        the round loop parses uniformly. No native Anthropic tool schema is
+        passed, keeping the loop backend-agnostic.
+        """
+        conv = self._convert_conversation_for_gpt(messages)
+        chat_msgs = [
+            {"role": m["role"], "content": m["content"]}
+            for m in conv
+            if m.get("role") in ("user", "assistant") and str(m.get("content") or "").strip()
+        ]
+        # Anthropic requires the first message to be a user turn.
+        if not chat_msgs or chat_msgs[0]["role"] != "user":
+            chat_msgs.insert(0, {"role": "user", "content": "Begin."})
+
+        tools_blob = self._serialize_tools_for_gpt(tools)
+        system_prompt = (
+            f"{self.gpt_planning_prompt}\n\n"
+            "## Available tools (serialized)\n"
+            f"{tools_blob}\n"
+        )
+
+        model = self.backend_models.get("claude", "claude-opus-4-8")
+        resp = self.claude_client.messages.create(
+            model=model,
+            max_tokens=max(1024, int(max_new_tokens)),
+            system=system_prompt,
+            messages=chat_msgs,
+        )
+        # Guard the refusal stop reason before reading content blocks.
+        if getattr(resp, "stop_reason", None) == "refusal":
+            logger.info("Claude declined the request (stop_reason=refusal).")
+            return "The model declined to answer this request."
+        answer = "".join(
+            getattr(b, "text", "") for b in resp.content
+            if getattr(b, "type", None) == "text"
+        ).strip()
+        logger.info(f"claude: {answer}")
         return answer
 
     def _serialize_tools_for_gpt(self, tools: Any) -> str:
@@ -1200,20 +1322,30 @@ class AthenaCore:
             if cancel_event is not None and cancel_event.is_set():
                 return "", False
             # Generate
-            if backend == "gpt":
-                conv_for_gpt = conversation
+            if backend != "athena":
+                conv_for_ext = conversation
                 if retry_count > 0:
-                    conv_for_gpt = list(conversation) + [{
+                    conv_for_ext = list(conversation) + [{
                         "role": "user",
                         "content": "Your previous tool-call formatting was invalid. Output again following the STRICT ATHENA-R1 tool-call protocol."
                     }]
-                output_str = self.gpt_llm_infer(
-                    messages=conv_for_gpt,
-                    temperature=max(0.0, float(temperature)),
-                    tools=tools,
-                    max_new_tokens=max_new_tokens,
-                    top_p=top_p,
-                )
+                if backend == "claude":
+                    output_str = self.claude_llm_infer(
+                        messages=conv_for_ext,
+                        temperature=max(0.0, float(temperature)),
+                        tools=tools,
+                        max_new_tokens=max_new_tokens,
+                        top_p=top_p,
+                    )
+                else:  # gpt (Azure) or gemini — OpenAI-compatible chat
+                    output_str = self.gpt_llm_infer(
+                        messages=conv_for_ext,
+                        temperature=max(0.0, float(temperature)),
+                        tools=tools,
+                        max_new_tokens=max_new_tokens,
+                        top_p=top_p,
+                        backend=backend,
+                    )
                 token_overflow = False
             else:
                 output_str, token_overflow = self.llm_infer(
@@ -1232,7 +1364,7 @@ class AthenaCore:
                 return output_str, token_overflow
 
             # If this is a retry, prepend the saved prefix
-            if (backend != "gpt") and retry_count > 0 and prefix_text:
+            if (backend == "athena") and retry_count > 0 and prefix_text:
                 full_output = prefix_text + output_str
             else:
                 full_output = output_str
@@ -1261,10 +1393,10 @@ class AthenaCore:
                 logger.info(f"[anti-repetition] Truncated output: {think_close_count} </think> → 1")
 
             # Validation checks
-            if backend == "gpt" and "<think>" in full_output:
+            if backend != "athena" and "<think>" in full_output:
                 if retry_count < self.tool_call_max_retries:
                     retry_count += 1
-                    logger.info(f"⚠️  GPT format error (<think> tags forbidden), retrying ({retry_count}/{self.tool_call_max_retries})...")
+                    logger.info(f"⚠️  {backend} format error (<think> tags forbidden), retrying ({retry_count}/{self.tool_call_max_retries})...")
                     continue
                 return full_output, token_overflow
 
@@ -1295,7 +1427,7 @@ class AthenaCore:
                 # Format error - retry
                 if retry_count < self.tool_call_max_retries:
                     prefix_text = full_output[:tool_call_start] if tool_call_start != -1 else full_output
-                    if backend != "gpt":
+                    if backend == "athena":
                         output_begin_string = prefix_text
                     retry_count += 1
                     logger.info(f"⚠️  Tool call format error, retrying ({retry_count}/{self.tool_call_max_retries})...")
@@ -1425,6 +1557,17 @@ class AthenaCore:
         # The only citation labels the report may keep — anything else (e.g. a
         # label copied from the prompt's few-shot example) is stripped.
         valid_sources = valid_source_labels(digest)
+        # Report generation streams from the local ATHENA-R1 model. API backends
+        # (Claude/Gemini) don't load it, so degrade gracefully instead of
+        # crashing on a None chat_template/model.
+        if self.model is None or self.chat_template is None:
+            yield (
+                "_Detailed report generation uses the local ATHENA-R1 model, "
+                "which isn't loaded for API backends (Claude/Gemini). The "
+                "agent's answer is complete; use Backend.ATHENA to generate a "
+                "structured clinical report._"
+            )
+            return
         messages = [
             {"role": "system", "content": REPORT_SYSTEM_PROMPT},
             {"role": "user", "content": f"QUESTION:\n{question}\n\n{digest}"},

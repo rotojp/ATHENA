@@ -15,8 +15,8 @@ from athena_r1 import AthenaR1, Backend
 def main() -> None:
     agent = AthenaR1(
         model=os.environ.get("ATHENA_MODEL_PATH", "mims-harvard/ATHENA-R1-Qwen3-8B"),
-        vllm_url=os.environ.get("VLLM_URL", "http://0.0.0.0:8000/v1"),
-        tool_server=os.environ.get("TOOLUNIVERSE_API", "http://0.0.0.0:8080"),
+        vllm_url=os.environ.get("VLLM_URL", "http://127.0.0.1:8000/v1"),
+        tool_server=os.environ.get("TOOLUNIVERSE_API", "http://127.0.0.1:8080"),
         azure_endpoint=os.environ.get("AZURE_OPENAI_ENDPOINT"),
         azure_api_key=os.environ.get("AZURE_API_KEY"),
     )

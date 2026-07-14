@@ -140,12 +140,16 @@ export ATHENA_R1_LOG_LEVEL=${ATHENA_R1_LOG_LEVEL:-WARNING}
 export ATHENA_MAX_AGENT_LEVEL=${ATHENA_MAX_AGENT_LEVEL:-1}
 export PYTHONUNBUFFERED=1
 
+# `setsid` is util-linux and absent on macOS; the `nohup … &` + `disown` below
+# already detach the web servers, so use setsid only where it exists.
+command -v setsid >/dev/null 2>&1 && SETSID=setsid || SETSID=
+
 # ── AG-UI demo ───────────────────────────────────────────────────────────
 if healthy 8090 /health; then
     echo "✓ AG-UI demo already up on :8090 (skipping)"
 else
     echo "→ Starting AG-UI server on :8090 (log: ${LOG_DIR}/athena_agui.log)"
-    PYTHONPATH=src AGUI_PORT=8090 setsid nohup "$PYTHON" -u web/agui_server.py \
+    PYTHONPATH=src AGUI_PORT=8090 $SETSID nohup "$PYTHON" -u web/agui_server.py \
         > "${LOG_DIR}/athena_agui.log" 2>&1 &
     disown
 fi
@@ -155,7 +159,7 @@ if healthy 9000 /health; then
     echo "✓ OpenAI-compat already up on :9000 (skipping)"
 else
     echo "→ Starting OpenAI-compat server on :9000 (log: ${LOG_DIR}/athena_openai.log)"
-    PYTHONPATH=src PORT=9000 setsid nohup "$PYTHON" -u web/openai_server.py \
+    PYTHONPATH=src PORT=9000 $SETSID nohup "$PYTHON" -u web/openai_server.py \
         > "${LOG_DIR}/athena_openai.log" 2>&1 &
     disown
 fi

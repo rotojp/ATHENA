@@ -80,6 +80,15 @@ case "$MLX_QUANT_BITS" in
     *)
         MODELS_DIR=${MLX_MODELS_DIR:-$REPO/.mlx-models}
         QDIR="$MODELS_DIR/$MODEL"
+        # Treat the cached copy as usable only if BOTH config.json and the
+        # weights landed. An interrupted/OOM-killed convert leaves a partial dir;
+        # mlx_lm would then serve broken weights and `mlx_lm convert` refuses to
+        # overwrite an existing path, so the stack would stay broken across
+        # re-runs. Purge a partial dir so this run re-converts cleanly.
+        if [ -d "$QDIR" ] && { [ ! -f "$QDIR/config.json" ] || ! ls "$QDIR"/*.safetensors >/dev/null 2>&1; }; then
+            echo "→ Removing incomplete quantized copy at $QDIR (will re-convert)"
+            rm -rf "$QDIR"
+        fi
         if [ ! -d "$QDIR" ]; then
             # mlx_lm convert's save step re-resolves the source repo with
             # local_files_only=True and aborts with IncompleteSnapshotError if the
