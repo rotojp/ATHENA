@@ -26,9 +26,15 @@ logger = logging.getLogger(__name__)
 
 
 class AgentRunContext:
-    def __init__(self, agent, message: str, call_agent: bool = False,
-                 call_agent_level: int = 0, progress_callback=None,
-                 agent_id: str = "main"):
+    def __init__(
+        self,
+        agent,
+        message: str,
+        call_agent: bool = False,
+        call_agent_level: int = 0,
+        progress_callback=None,
+        agent_id: str = "main",
+    ):
         self.agent = agent
         self.message = message
         self.call_agent = call_agent
@@ -57,8 +63,11 @@ class AgentRunContext:
     def __enter__(self):
         logger.info("start")
         self.picked_tools_prompt, self.call_agent_level = self.agent.initialize_tools_prompt(
-            self.call_agent, self.call_agent_level, self.message)
-        self.conversation = self.agent.initialize_conversation(self.message, None, self.call_agent_level)
+            self.call_agent, self.call_agent_level, self.message
+        )
+        self.conversation = self.agent.initialize_conversation(
+            self.message, None, self.call_agent_level
+        )
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -66,7 +75,9 @@ class AgentRunContext:
             logger.info(f"Agent run terminated with error: {exc_val}")
         return False
 
-    def process_tool_calls(self, temperature, max_new_tokens, top_p, top_k, min_p, return_conversation):
+    def process_tool_calls(
+        self, temperature, max_new_tokens, top_p, top_k, min_p, return_conversation
+    ):
         if len(self.last_outputs) > 0:
             result = self.agent.run_function_call(
                 self.last_outputs[-1],
@@ -84,46 +95,61 @@ class AgentRunContext:
                 min_p=min_p,
                 progress_callback=self.progress_callback,
                 agent_id=self.agent_id,
-                cancel_event=getattr(self, "cancel_event", None))
+                cancel_event=getattr(self, "cancel_event", None),
+            )
 
             # Extract revised messages resulting from the tool call directly to conversation
-            self.conversation.extend(result['messages'])
-            self.picked_tools_prompt = result['tools_prompt']
+            self.conversation.extend(result["messages"])
+            self.picked_tools_prompt = result["tools_prompt"]
 
-            if result['should_stop']:
-                return True, (result['final_result'], self.conversation) if return_conversation else result['final_result']
+            if result["should_stop"]:
+                return True, (
+                    result["final_result"],
+                    self.conversation,
+                ) if return_conversation else result["final_result"]
         return False, None
 
     def _condense_massive_tools(self, temperature, top_p, top_k, min_p):
         """Condenses individual tool outputs that exceed 30% of token capacity."""
         summarized_count = 0
         threshold = int(self.agent.max_token * self.agent.compress_ratio * 0.3)
-        
+
         for i in range(len(self.conversation)):
             msg = self.conversation[i]
-            if msg.get('role') == 'tool':
-                content = msg.get('content', '')
-                if not str(content).startswith("[Summarized Tool Output]:") and len(content) > threshold:
-                    logger.info(f"Summarizing massive tool output at index {i} (len={len(content)})...")
+            if msg.get("role") == "tool":
+                content = msg.get("content", "")
+                if (
+                    not str(content).startswith("[Summarized Tool Output]:")
+                    and len(content) > threshold
+                ):
+                    logger.info(
+                        f"Summarizing massive tool output at index {i} (len={len(content)})..."
+                    )
                     thought_context = ""
-                    if i > 0 and self.conversation[i-1].get('role') == 'assistant':
-                        thought_context = self.conversation[i-1].get('content', '')
+                    if i > 0 and self.conversation[i - 1].get("role") == "assistant":
+                        thought_context = self.conversation[i - 1].get("content", "")
 
                     result_summary = self.agent.run_summary_agent(
                         thought_calls=thought_context,
                         function_response=content,
                         temperature=0.1,
                         max_new_tokens=1024,
-                        top_p=top_p, top_k=top_k, min_p=min_p
+                        top_p=top_p,
+                        top_k=top_k,
+                        min_p=min_p,
                     )
 
                     if result_summary and len(result_summary) < len(content):
-                        self.conversation[i]['full_content'] = content 
-                        self.conversation[i]['content'] = f"[Summarized Tool Output]: {result_summary}"
+                        self.conversation[i]["full_content"] = content
+                        self.conversation[i]["content"] = (
+                            f"[Summarized Tool Output]: {result_summary}"
+                        )
                         summarized_count += 1
-                        
+
         if summarized_count > 0:
-            logger.info(f"First Pass Compaction completed. Summarized {summarized_count} massive tool results.")
+            logger.info(
+                f"First Pass Compaction completed. Summarized {summarized_count} massive tool results."
+            )
 
     def _iteratively_compress_tools(self, safe_limit, temperature, top_p, top_k, min_p):
         """Loops over remaining unsummarized tools, largest first, until safe limit is met.
@@ -139,10 +165,12 @@ class AgentRunContext:
         MIN_TOOL_SIZE = 1000
         prev_estimated_tokens = None
         while True:
-            current_length_chars = sum(len(str(msg.get('content', ''))) for msg in self.conversation)
+            current_length_chars = sum(
+                len(str(msg.get("content", ""))) for msg in self.conversation
+            )
             tool_desc_chars = len(str(self.picked_tools_prompt))
             estimated_tokens = (current_length_chars + tool_desc_chars) / self.agent.compress_ratio
-            
+
             if estimated_tokens <= safe_limit:
                 return True
 
@@ -150,66 +178,99 @@ class AgentRunContext:
             if prev_estimated_tokens is not None:
                 progress = prev_estimated_tokens - estimated_tokens
                 if progress < prev_estimated_tokens * 0.01:
-                    logger.info(f"Iterative compression stalled (saved only {int(progress)} tokens). Stopping.")
+                    logger.info(
+                        f"Iterative compression stalled (saved only {int(progress)} tokens). Stopping."
+                    )
                     return False
             prev_estimated_tokens = estimated_tokens
-            logger.info(f"Iterative Space Check: Context still at {int(estimated_tokens)} tokens. Condensing remaining tools.")
-            
+            logger.info(
+                f"Iterative Space Check: Context still at {int(estimated_tokens)} tokens. Condensing remaining tools."
+            )
+
             unsummarized_tools = []
             for i, msg in enumerate(self.conversation):
-                if msg.get('role') == 'tool':
-                    content = msg.get('content', '')
-                    if not str(content).startswith("[Summarized Tool Output]:") and len(content) >= MIN_TOOL_SIZE:
+                if msg.get("role") == "tool":
+                    content = msg.get("content", "")
+                    if (
+                        not str(content).startswith("[Summarized Tool Output]:")
+                        and len(content) >= MIN_TOOL_SIZE
+                    ):
                         unsummarized_tools.append((i, len(str(content))))
-            
+
             if not unsummarized_tools:
-                logger.info("No tool outputs large enough to compress (all < 1000 chars). Stopping.")
+                logger.info(
+                    "No tool outputs large enough to compress (all < 1000 chars). Stopping."
+                )
                 return False
-                
+
             unsummarized_tools.sort(key=lambda x: x[1], reverse=True)
             target_idx = unsummarized_tools[0][0]
-            
-            content = self.conversation[target_idx].get('content', '')
-            logger.info(f"Summarizing current largest tool output at index {target_idx} (len={len(content)})...")
-            
+
+            content = self.conversation[target_idx].get("content", "")
+            logger.info(
+                f"Summarizing current largest tool output at index {target_idx} (len={len(content)})..."
+            )
+
             thought_context = ""
-            if target_idx > 0 and self.conversation[target_idx-1].get('role') == 'assistant':
-                thought_context = self.conversation[target_idx-1].get('content', '')
+            if target_idx > 0 and self.conversation[target_idx - 1].get("role") == "assistant":
+                thought_context = self.conversation[target_idx - 1].get("content", "")
 
             result_summary = self.agent.run_summary_agent(
                 thought_calls=thought_context,
                 function_response=content,
                 temperature=0.1,
                 max_new_tokens=1024,
-                top_p=top_p, top_k=top_k, min_p=min_p
+                top_p=top_p,
+                top_k=top_k,
+                min_p=min_p,
             )
 
             if result_summary and len(result_summary) < len(content):
-                self.conversation[target_idx]['full_content'] = content 
-                self.conversation[target_idx]['content'] = f"[Summarized Tool Output]: {result_summary}"
+                self.conversation[target_idx]["full_content"] = content
+                self.conversation[target_idx]["content"] = (
+                    f"[Summarized Tool Output]: {result_summary}"
+                )
             else:
-                logger.info(f"Summarization failed to shrink content at index {target_idx}. Marking to skip.")
-                self.conversation[target_idx]['content'] = f"[Summarized Tool Output]: {content}"
+                logger.info(
+                    f"Summarization failed to shrink content at index {target_idx}. Marking to skip."
+                )
+                self.conversation[target_idx]["content"] = f"[Summarized Tool Output]: {content}"
 
-    def ensure_context_space(self, temperature, max_new_tokens, top_p, top_k, min_p, return_conversation, dynamic_limit=0.7, compact=False):
+    def ensure_context_space(
+        self,
+        temperature,
+        max_new_tokens,
+        top_p,
+        top_k,
+        min_p,
+        return_conversation,
+        dynamic_limit=0.7,
+        compact=False,
+    ):
         """Preemptive Context Compaction (Strategy 1). Evaluates history and shrinks large tools."""
         if compact:
-            logger.info(" Forced Strategy 2 Triggered. Bypassing tool shrink and checkpointing context... ")
-            self._handle_token_overflow(temperature, max_new_tokens, top_p, top_k, min_p, return_conversation)
+            logger.info(
+                " Forced Strategy 2 Triggered. Bypassing tool shrink and checkpointing context... "
+            )
+            self._handle_token_overflow(
+                temperature, max_new_tokens, top_p, top_k, min_p, return_conversation
+            )
             return True
 
         safe_limit = self.agent.max_token * dynamic_limit
-        
-        current_length_chars = sum(len(str(msg.get('content', ''))) for msg in self.conversation)
+
+        current_length_chars = sum(len(str(msg.get("content", ""))) for msg in self.conversation)
         tool_desc_chars = len(str(self.picked_tools_prompt))
         estimated_tokens = (current_length_chars + tool_desc_chars) / self.agent.compress_ratio
-        
+
         if estimated_tokens > safe_limit:
-            logger.info(f"Preemptive Space Check: Context at {int(estimated_tokens)} tokens (Limit: {safe_limit} safe). Triggering Compaction.")
-            
+            logger.info(
+                f"Preemptive Space Check: Context at {int(estimated_tokens)} tokens (Limit: {safe_limit} safe). Triggering Compaction."
+            )
+
             # Step 1: Condense huge anomalies
             self._condense_massive_tools(temperature, top_p, top_k, min_p)
-            
+
             # Step 2: Iteratively meet requirement
             success = self._iteratively_compress_tools(safe_limit, temperature, top_p, top_k, min_p)
             if not success:
@@ -217,14 +278,18 @@ class AgentRunContext:
                 return False
 
         # Final readout
-        current_length_chars = sum(len(str(msg.get('content', ''))) for msg in self.conversation)
+        current_length_chars = sum(len(str(msg.get("content", ""))) for msg in self.conversation)
         tool_desc_chars = len(str(self.picked_tools_prompt))
-        final_estimated_tokens = (current_length_chars + tool_desc_chars) / self.agent.compress_ratio
-        
+        final_estimated_tokens = (
+            current_length_chars + tool_desc_chars
+        ) / self.agent.compress_ratio
+
         if final_estimated_tokens <= safe_limit:
-            logger.info(f" Space requirement met! Context fits well within safe limits ({int(final_estimated_tokens)} tokens). ")
+            logger.info(
+                f" Space requirement met! Context fits well within safe limits ({int(final_estimated_tokens)} tokens). "
+            )
             return True
-            
+
         return False
 
     def generate_next_output(self, temperature, max_new_tokens, top_p, top_k, min_p):
@@ -234,38 +299,53 @@ class AgentRunContext:
             tools=self.picked_tools_prompt,
             temperature=temperature,
             max_new_tokens=max_new_tokens,
-            top_p=top_p, top_k=top_k, min_p=min_p,
+            top_p=top_p,
+            top_k=top_k,
+            min_p=min_p,
             backend=backend,
             # Per-request cancel signal (set on ctx by run_multistep_agent);
             # enables streaming generation that aborts mid-token on client
             # disconnect instead of running to full max_new_tokens.
-            cancel_event=getattr(self, "cancel_event", None))
+            cancel_event=getattr(self, "cancel_event", None),
+        )
         return last_outputs_str
 
-    def _handle_token_overflow(self, temperature, max_new_tokens, top_p, top_k, min_p, return_conversation):
+    def _handle_token_overflow(
+        self, temperature, max_new_tokens, top_p, top_k, min_p, return_conversation
+    ):
         """Reactive Context Compaction (Strategy 2) for when generation still fails."""
-        logger.info("Internal error: The number of tokens exceeds the maximum limit despite tool shrink. Attempting context checkpoint...")
+        logger.info(
+            "Internal error: The number of tokens exceeds the maximum limit despite tool shrink. Attempting context checkpoint..."
+        )
         backend = self.agent._get_backend_for_level(self.call_agent_level)
-        
+
         context_summary = self.agent.run_context_summary_agent(
             self.conversation,
             temperature=0.1,
             max_new_tokens=20480,
-            top_p=top_p, top_k=top_k, min_p=min_p
+            top_p=top_p,
+            top_k=top_k,
+            min_p=min_p,
         )
 
         if context_summary:
             logger.info("Context checkpoint successful. Updating conversation history.")
             new_conversation = []
-            if self.conversation and self.conversation[0].get('role') == 'system':
+            if self.conversation and self.conversation[0].get("role") == "system":
                 new_conversation.append(self.conversation[0])
             else:
-                if backend != 'athena':
-                    new_conversation = self.agent.set_system_prompt(new_conversation, self.agent.gpt_planning_prompt)
+                if backend != "athena":
+                    new_conversation = self.agent.set_system_prompt(
+                        new_conversation, self.agent.gpt_planning_prompt
+                    )
                 else:
-                    new_conversation = self.agent.set_system_prompt(new_conversation, self.agent.prompt_multi_step)
+                    new_conversation = self.agent.set_system_prompt(
+                        new_conversation, self.agent.prompt_multi_step
+                    )
 
-            first_user_msg = next((msg for msg in self.conversation if msg.get('role') == 'user'), None)
+            first_user_msg = next(
+                (msg for msg in self.conversation if msg.get("role") == "user"), None
+            )
             if first_user_msg:
                 new_conversation.append(first_user_msg)
 
@@ -278,33 +358,45 @@ class AgentRunContext:
         return False
 
     def check_final_answer(self, last_outputs_str, return_conversation):
-        if '[FinalAnswer]' in last_outputs_str:
-            final_answer = last_outputs_str.split('[FinalAnswer]')[-1].strip()
+        if "[FinalAnswer]" in last_outputs_str:
+            final_answer = last_outputs_str.split("[FinalAnswer]")[-1].strip()
             self.conversation.append({"role": "assistant", "content": final_answer})
             return True, (final_answer, self.conversation) if return_conversation else final_answer
 
         # If model outputs </think> without <tool_call>, treat as final answer
-        if '</think>' in last_outputs_str and '<tool_call>' not in last_outputs_str:
-            if not hasattr(self, '_no_tool_rounds'):
+        if "</think>" in last_outputs_str and "<tool_call>" not in last_outputs_str:
+            if not hasattr(self, "_no_tool_rounds"):
                 self._no_tool_rounds = 0
             self._no_tool_rounds += 1
             if self._no_tool_rounds >= 2:
-                logger.info(f"[anti-repetition] {self._no_tool_rounds} consecutive rounds without tool_call. Treating as final answer.")
-                final_answer = last_outputs_str.split('</think>')[-1].strip()
+                logger.info(
+                    f"[anti-repetition] {self._no_tool_rounds} consecutive rounds without tool_call. Treating as final answer."
+                )
+                final_answer = last_outputs_str.split("</think>")[-1].strip()
                 if not final_answer:
                     final_answer = last_outputs_str
                 self.conversation.append({"role": "assistant", "content": final_answer})
-                return True, (final_answer, self.conversation) if return_conversation else final_answer
+                return True, (
+                    final_answer,
+                    self.conversation,
+                ) if return_conversation else final_answer
         else:
             self._no_tool_rounds = 0
 
         return False, None
 
-    def handle_force_finish(self, temperature, max_new_tokens, top_p, top_k, min_p, return_conversation):
+    def handle_force_finish(
+        self, temperature, max_new_tokens, top_p, top_k, min_p, return_conversation
+    ):
         if self.agent.force_finish:
             answer = self.agent.get_answer_based_on_unfinished_reasoning(
-                self.conversation, temperature, max_new_tokens,
-                top_p=top_p, top_k=top_k, min_p=min_p)
+                self.conversation,
+                temperature,
+                max_new_tokens,
+                top_p=top_p,
+                top_k=top_k,
+                min_p=min_p,
+            )
             return (answer, self.conversation) if return_conversation else answer
         return (None, self.conversation) if return_conversation else None
 
@@ -327,8 +419,13 @@ class AgentRunContext:
         def _synth(conv):
             try:
                 ans = agent.get_answer_based_on_unfinished_reasoning(
-                    conv, temperature, min(max_new_tokens, 1024),
-                    top_p=top_p, top_k=top_k, min_p=min_p)
+                    conv,
+                    temperature,
+                    min(max_new_tokens, 1024),
+                    top_p=top_p,
+                    top_k=top_k,
+                    min_p=min_p,
+                )
                 ans = (ans or "").strip()
                 if "[FinalAnswer]" in ans:
                     ans = ans.split("[FinalAnswer]")[-1].strip()
@@ -355,8 +452,9 @@ class AgentRunContext:
             return ans
 
         # Tier 2 — drop all tool messages; keep system prompt + the question.
-        minimal = [m for m in self.conversation
-                   if isinstance(m, dict) and m.get("role") == "system"]
+        minimal = [
+            m for m in self.conversation if isinstance(m, dict) and m.get("role") == "system"
+        ]
         minimal.append({"role": "user", "content": str(self.message)})
         ans = _synth(minimal)
         if ans:
@@ -365,15 +463,22 @@ class AgentRunContext:
         # Tier 3 — direct, no-tools answer from the question alone.
         try:
             direct = agent.llm_infer(
-                messages=[{
-                    "role": "user",
-                    "content": ("Answer the following clinical question "
-                                "concisely from general medical knowledge:\n\n"
-                                + str(self.message)),
-                }],
-                temperature=temperature, tools=None,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": (
+                            "Answer the following clinical question "
+                            "concisely from general medical knowledge:\n\n" + str(self.message)
+                        ),
+                    }
+                ],
+                temperature=temperature,
+                tools=None,
                 max_new_tokens=min(max_new_tokens, 768),
-                top_p=top_p, top_k=top_k, min_p=min_p)
+                top_p=top_p,
+                top_k=top_k,
+                min_p=min_p,
+            )
             direct = (direct or "").strip()
             if "</think>" in direct:
                 direct = direct.split("</think>")[-1].strip()
@@ -383,11 +488,13 @@ class AgentRunContext:
             logger.info(f"[emergency] direct answer failed: {e!r}")
 
         # Tier 4 — graceful honest fallback (never a raw internal error).
-        return ("I couldn't complete full tool-based verification for this "
-                "question because the gathered information exceeded the model's "
-                "context limit. Based on the reasoning so far I don't have a "
-                "confident verified answer — please try a more specific "
-                "question or narrow the scope.")
+        return (
+            "I couldn't complete full tool-based verification for this "
+            "question because the gathered information exceeded the model's "
+            "context limit. Based on the reasoning so far I don't have a "
+            "confident verified answer — please try a more specific "
+            "question or narrow the scope."
+        )
 
 
 class AthenaCore:
@@ -398,33 +505,35 @@ class AthenaCore:
     clean, supported interface.
     """
 
-    def __init__(self, model_name,
-                 rag_model_name,
-                 tool_files_dict=None,
-                 enable_finish=True,
-                 enable_rag=True,
-                 enable_summary=False,
-                 init_rag_num=0,
-                 step_rag_num=10,
-                 force_finish=True,
-                 additional_default_tools=None,
-                 cache_tool=False,
-                 tool_in_results=False,
-                 add_call_id=True,
-                 vllm_server_url='http://127.0.0.1:8000',
-                 max_token=32768,
-                 compress_ratio=3.5,
-                 tool_call_max_retries=3,
-                 keep_full_history=False,
-                 backend_by_level: Optional[Dict[int, str]] = None,
-                 backend_default: str = "athena",
-                 backend_models: Optional[Dict[str, str]] = None,
-                 max_agent_level: Optional[int] = None,
-                 summary_format_vllm_server_url=None,
-                 summary_format_model_name=None,
-                 summary_format_args=None,
-                 update_tool_list=False,
-                 ):
+    def __init__(
+        self,
+        model_name,
+        rag_model_name,
+        tool_files_dict=None,
+        enable_finish=True,
+        enable_rag=True,
+        enable_summary=False,
+        init_rag_num=0,
+        step_rag_num=10,
+        force_finish=True,
+        additional_default_tools=None,
+        cache_tool=False,
+        tool_in_results=False,
+        add_call_id=True,
+        vllm_server_url="http://127.0.0.1:8000",
+        max_token=32768,
+        compress_ratio=3.5,
+        tool_call_max_retries=3,
+        keep_full_history=False,
+        backend_by_level: Optional[Dict[int, str]] = None,
+        backend_default: str = "athena",
+        backend_models: Optional[Dict[str, str]] = None,
+        max_agent_level: Optional[int] = None,
+        summary_format_vllm_server_url=None,
+        summary_format_model_name=None,
+        summary_format_args=None,
+        update_tool_list=False,
+    ):
         # Honor the constructor argument. An earlier version hardcoded 0 here
         # and relied on the AthenaR1 wrapper to patch `_core.max_agent_level`
         # right after construction — but constructing the engine directly
@@ -454,7 +563,7 @@ class AthenaCore:
         self.tool_in_results = tool_in_results
         self.add_call_id = add_call_id
         # Format / mode are fixed for ATHENA-R1: Qwen3-8B served via vLLM HTTP.
-        self.format = 'qwen'
+        self.format = "qwen"
         self.vllm_server_url = vllm_server_url
         self.max_token = max_token
         self.compress_ratio = compress_ratio
@@ -466,21 +575,26 @@ class AthenaCore:
         self.backend_by_level = dict(backend_by_level or {})
         # Model id per external (non-local) backend. Callers override individual
         # entries via `backend_models`; the rest keep these defaults.
+        # gemini default is flash, not pro: pro is not on Google's free tier
+        # (returns 429 limit:0), so flash is the working out-of-box default.
         self.backend_models = {
             "gpt": "gpt-5",
             "claude": "claude-opus-4-8",
-            "gemini": "gemini-2.5-pro",
+            "gemini": "gemini-2.5-flash",
         }
         self.backend_models.update(backend_models or {})
         self.summary_format_vllm_server_url = summary_format_vllm_server_url
         self.summary_format_model_name = summary_format_model_name
-        self.summary_format_args = summary_format_args or {
-            'temperature': 0.6,
-            'top_p': 0.95,
-            'top_k': 20,
-            'min_p': 0.0,
-            'max_new_tokens': 1024  # was 32768 — too large; native_v2 only needs short letter answer
-        }
+        self.summary_format_args = (
+            summary_format_args
+            or {
+                "temperature": 0.6,
+                "top_p": 0.95,
+                "top_k": 20,
+                "min_p": 0.0,
+                "max_new_tokens": 1024,  # was 32768 — too large; native_v2 only needs short letter answer
+            }
+        )
         self.summary_format_model = None
         self.tool_processor_registry = None
 
@@ -503,9 +617,7 @@ class AthenaCore:
         error only on first GPT use if no credentials are configured.
         """
         if self._gpt_client_obj is None:
-            api_key = (
-                os.getenv("AZURE_API_KEY") or os.getenv("AZURE_OPENAI_API_KEY")
-            )
+            api_key = os.getenv("AZURE_API_KEY") or os.getenv("AZURE_OPENAI_API_KEY")
             azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
             if not api_key:
                 raise RuntimeError(
@@ -524,9 +636,7 @@ class AthenaCore:
             self._gpt_client_obj = AzureOpenAI(
                 azure_endpoint=azure_endpoint,
                 api_key=api_key,
-                api_version=os.getenv(
-                    "AZURE_OPENAI_API_VERSION", "2025-04-01-preview"
-                ),
+                api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2025-04-01-preview"),
             )
         return self._gpt_client_obj
 
@@ -544,8 +654,10 @@ class AthenaCore:
                 import anthropic
             except ImportError as exc:
                 raise RuntimeError(
-                    "Backend.CLAUDE needs the `anthropic` package. Install it "
-                    'with `pip install "athena-r1[api]"` or `pip install anthropic`.'
+                    "Backend.CLAUDE needs the `anthropic` package, which is not "
+                    "installed in the interpreter running ATHENA. Install it with "
+                    "`python -m pip install anthropic` (use the SAME python that "
+                    'runs the server), or from the repo `pip install -e ".[api]"`.'
                 ) from exc
             self._claude_client_obj = anthropic.Anthropic()
         return self._claude_client_obj
@@ -590,15 +702,14 @@ class AthenaCore:
         # those are only used by the local (Backend.ATHENA) path.
         if self.model_name is None:
             logger.info(
-                "No local model_name set — skipping vLLM/tokenizer load "
-                "(external API backend)."
+                "No local model_name set — skipping vLLM/tokenizer load (external API backend)."
             )
             self.model = None
             self.tokenizer = None
             self.chat_template = None
             return
 
-        if not self.vllm_server_url.endswith('/v1'):
+        if not self.vllm_server_url.endswith("/v1"):
             self.vllm_server_url = f"{self.vllm_server_url.rstrip('/')}/v1"
         # Per-request timeout for the vLLM client. The OpenAI SDK defaults to a
         # 600 s read timeout, so an occasional stuck vLLM request (one that never
@@ -610,23 +721,27 @@ class AthenaCore:
         _read_to = float(os.environ.get("ATHENA_VLLM_READ_TIMEOUT", "120"))
         _client_timeout = (
             httpx.Timeout(connect=10.0, read=_read_to, write=_read_to, pool=_read_to)
-            if _read_to > 0 else None
+            if _read_to > 0
+            else None
         )
-        self.model = OpenAI(api_key="EMPTY", base_url=self.vllm_server_url,
-                            timeout=_client_timeout)
+        self.model = OpenAI(api_key="EMPTY", base_url=self.vllm_server_url, timeout=_client_timeout)
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         self.chat_template = Template(self.tokenizer.chat_template)
 
         if self.summary_format_vllm_server_url is not None:
-            if not self.summary_format_vllm_server_url.endswith('/v1'):
-                self.summary_format_vllm_server_url = f"{self.summary_format_vllm_server_url.rstrip('/')}/v1"
+            if not self.summary_format_vllm_server_url.endswith("/v1"):
+                self.summary_format_vllm_server_url = (
+                    f"{self.summary_format_vllm_server_url.rstrip('/')}/v1"
+                )
             self.summary_format_model = OpenAI(
                 api_key="EMPTY",
                 base_url=self.summary_format_vllm_server_url,
             )
             if self.summary_format_model_name is None:
                 self.summary_format_model_name = self.model_name
-            logger.info(f"Summary/Format model loaded from {self.summary_format_vllm_server_url} with model {self.summary_format_model_name}")
+            logger.info(
+                f"Summary/Format model loaded from {self.summary_format_vllm_server_url} with model {self.summary_format_model_name}"
+            )
 
         return f"Model {model_name} loaded successfully."
 
@@ -636,6 +751,7 @@ class AthenaCore:
         api_url = os.environ.get("TOOLUNIVERSE_API")
         if api_url:
             from athena_r1._tu_compat import CompatToolUniverseClient
+
             if not api_url.startswith("http"):
                 api_url = "http://" + api_url
             logger.info(f"Using ToolUniverse server: {api_url}")
@@ -643,7 +759,7 @@ class AthenaCore:
         else:
             self.tooluniverse = ToolUniverse(tool_files=self.tool_files_dict)
         if tool_type is not None:
-            if 'tool_finder' not in tool_type:
+            if "tool_finder" not in tool_type:
                 tool_type.append("tool_finder")
             self.tooluniverse.load_tools(tool_type=tool_type)
         else:
@@ -658,20 +774,19 @@ class AthenaCore:
         picked_tools_prompt = []
         if self.max_agent_level is not None:
             call_agent = bool(call_agent) and (call_agent_level < self.max_agent_level)
-        picked_tools_prompt = self.add_special_tools(picked_tools_prompt, call_agent=call_agent, call_agent_level=call_agent_level)
+        picked_tools_prompt = self.add_special_tools(
+            picked_tools_prompt, call_agent=call_agent, call_agent_level=call_agent_level
+        )
 
         if not call_agent and self.enable_rag:
             # Call Tool_RAG
             tool_call = {
                 "name": "Tool_RAG",
-                "arguments": {
-                    "description": message,
-                    "limit": self.init_rag_num
-                }
+                "arguments": {"description": message, "limit": self.init_rag_num},
             }
             try:
                 call_result = self.tooluniverse.run_one_function(tool_call)
-                if isinstance(call_result, dict) and 'error' in call_result:
+                if isinstance(call_result, dict) and "error" in call_result:
                     logger.info(f"Tool_RAG Error: {call_result}")
                     return picked_tools_prompt, call_agent_level
 
@@ -699,24 +814,24 @@ class AthenaCore:
         # The CallAgent tool is exposed to the model only when call_agent=True
         # AND the configured depth limit hasn't been reached. Otherwise the
         # model never sees it and can't recurse.
-        if call_agent and (
-            self.max_agent_level is None or call_agent_level < self.max_agent_level
-        ):
-            tools.append(self.tooluniverse.tool_specification('CallAgent', return_prompt=True))
+        if call_agent and (self.max_agent_level is None or call_agent_level < self.max_agent_level):
+            tools.append(self.tooluniverse.tool_specification("CallAgent", return_prompt=True))
             logger.info("CallAgent tool is added")
         if not call_agent:
             if self.enable_rag:
-                tools.append(self.tooluniverse.tool_specification('Tool_RAG', return_prompt=True))
+                tools.append(self.tooluniverse.tool_specification("Tool_RAG", return_prompt=True))
                 logger.info("Tool_RAG tool is added")
 
             if self.additional_default_tools is not None:
                 for each_tool_name in self.additional_default_tools:
-                    tool_prompt = self.tooluniverse.tool_specification(each_tool_name, return_prompt=True)
+                    tool_prompt = self.tooluniverse.tool_specification(
+                        each_tool_name, return_prompt=True
+                    )
                     if tool_prompt is not None:
                         logger.info(f"{each_tool_name} tool is added")
                         tools.append(tool_prompt)
         if self.enable_finish:
-            tools.append(self.tooluniverse.tool_specification('Finish', return_prompt=True))
+            tools.append(self.tooluniverse.tool_specification("Finish", return_prompt=True))
             logger.info("Finish tool is added")
         return tools
 
@@ -742,7 +857,7 @@ class AthenaCore:
         if last_user_idx is None:
             return conversation
 
-        cleaned = conversation[:last_user_idx + 1]
+        cleaned = conversation[: last_user_idx + 1]
 
         for i in range(last_user_idx + 1, len(conversation)):
             msg = conversation[i]
@@ -774,27 +889,34 @@ class AthenaCore:
             conversation = self.set_system_prompt(conversation, sys_prompt)
 
         # Append current user message if not already present
-        if not conversation or conversation[-1].get("role") != "user" or conversation[-1].get("content") != message:
+        if (
+            not conversation
+            or conversation[-1].get("role") != "user"
+            or conversation[-1].get("content") != message
+        ):
             conversation.append({"role": "user", "content": message})
 
         return conversation
 
-    def run_function_call(self, fcall_str,
-                         existing_tools_prompt=None,
-                         message_for_call_agent=None,
-                         call_agent=False,
-                         call_agent_level=None,
-                         temperature=None,
-                         conversation=None,
-                         enable_summary=False,
-                         last_status=None,
-                         max_new_tokens=4096,
-                         top_p=0.95,
-                         top_k=20,
-                         min_p=0.0,
-                         progress_callback=None,
-                         agent_id="main",
-                         cancel_event=None):
+    def run_function_call(
+        self,
+        fcall_str,
+        existing_tools_prompt=None,
+        message_for_call_agent=None,
+        call_agent=False,
+        call_agent_level=None,
+        temperature=None,
+        conversation=None,
+        enable_summary=False,
+        last_status=None,
+        max_new_tokens=4096,
+        top_p=0.95,
+        top_k=20,
+        min_p=0.0,
+        progress_callback=None,
+        agent_id="main",
+        cancel_event=None,
+    ):
         """Dispatch each <tool_call> to its registered processor.
 
         `progress_callback`, `agent_id`, and `cancel_event` are forwarded via
@@ -803,39 +925,42 @@ class AthenaCore:
         """
 
         function_call_json, message = self.tooluniverse.extract_function_call_json(
-            fcall_str, return_message=True, verbose=False, format=self.format)
+            fcall_str, return_message=True, verbose=False, format=self.format
+        )
 
         call_results = []
-        special_tool_call = ''
+        special_tool_call = ""
         callagent_plans = []
 
         if function_call_json is not None:
             if isinstance(function_call_json, list):
                 if not self.cache_tool and self.update_tool_list:
-                    if 'Tool_RAG' in [each['name'] for each in function_call_json]:
-                        existing_tools_prompt = self.add_special_tools([], call_agent=call_agent, call_agent_level=call_agent_level or 0)
+                    if "Tool_RAG" in [each["name"] for each in function_call_json]:
+                        existing_tools_prompt = self.add_special_tools(
+                            [], call_agent=call_agent, call_agent_level=call_agent_level or 0
+                        )
 
                 # Build context for tool processors
                 context = {
-                    'message': message,
-                    'existing_tools_prompt': existing_tools_prompt,
-                    'conversation': conversation,
-                    'call_agent': call_agent,
-                    'call_agent_level': call_agent_level,
-                    'temperature': temperature,
-                    'top_p': top_p,
-                    'top_k': top_k,
-                    'min_p': min_p,
-                    'callagent_plans': callagent_plans,
-                    'update_tool_list': self.update_tool_list,
+                    "message": message,
+                    "existing_tools_prompt": existing_tools_prompt,
+                    "conversation": conversation,
+                    "call_agent": call_agent,
+                    "call_agent_level": call_agent_level,
+                    "temperature": temperature,
+                    "top_p": top_p,
+                    "top_k": top_k,
+                    "min_p": min_p,
+                    "callagent_plans": callagent_plans,
+                    "update_tool_list": self.update_tool_list,
                     # For multi-agent + Tool_RAG nested streaming:
-                    'progress_callback': progress_callback,
-                    'agent_id': agent_id,
-                    'max_new_tokens': max_new_tokens,
+                    "progress_callback": progress_callback,
+                    "agent_id": agent_id,
+                    "max_new_tokens": max_new_tokens,
                     # Threaded through so CallAgent can propagate user-abort
                     # to recursive child runs (otherwise sub-agents keep
                     # running after the top-level Stop button is clicked).
-                    'cancel_event': cancel_event,
+                    "cancel_event": cancel_event,
                 }
 
                 # Pre-allocate result slots so parallel CallAgents can write
@@ -858,9 +983,11 @@ class AthenaCore:
                     if context_updates is None:
                         return False
                     context.update(context_updates)
-                    callagent_plans = context.get('callagent_plans', callagent_plans)
-                    existing_tools_prompt = context.get('existing_tools_prompt', existing_tools_prompt)
-                    special_tool_call = context.get('special_tool_call', special_tool_call)
+                    callagent_plans = context.get("callagent_plans", callagent_plans)
+                    existing_tools_prompt = context.get(
+                        "existing_tools_prompt", existing_tools_prompt
+                    )
+                    special_tool_call = context.get("special_tool_call", special_tool_call)
                     if call_result is None:
                         logger.info(f"This call returns None: {function_call_json[idx]}")
                     call_id = None
@@ -868,7 +995,7 @@ class AthenaCore:
                         call_id = self.tooluniverse.call_id_gen()
                         function_call_json[idx]["call_id"] = call_id
                     slotted_results[idx] = self._build_tool_result_message(call_result, call_id)
-                    return special_tool_call == 'Finish'
+                    return special_tool_call == "Finish"
 
                 # Parallelization policy: consecutive CallAgent tool-calls are
                 # independent (each spawns its own subagent recursion) and can
@@ -877,7 +1004,12 @@ class AthenaCore:
                 # control flow (`Finish`).
                 # Disable parallelism with ATHENA_R1_PARALLEL_CALLAGENT=0.
                 import os as _os
-                parallel_enabled = _os.environ.get("ATHENA_R1_PARALLEL_CALLAGENT", "1") not in ("0", "false", "False")
+
+                parallel_enabled = _os.environ.get("ATHENA_R1_PARALLEL_CALLAGENT", "1") not in (
+                    "0",
+                    "false",
+                    "False",
+                )
 
                 i = 0
                 stop_loop = False
@@ -906,16 +1038,22 @@ class AthenaCore:
                             stop_loop = True
                     else:
                         from concurrent.futures import ThreadPoolExecutor, as_completed
+
                         # Cap concurrency to avoid runaway thread explosion when
                         # a model emits dozens of CallAgents in one batch (each
                         # of which may spawn more recursively). 4 parallel is
                         # plenty for typical interleaved sub-agent flows; the
                         # rest queue up behind them.
-                        _MAX_PARALLEL_CALLAGENT = int(_os.environ.get(
-                            "ATHENA_R1_PARALLEL_CALLAGENT_MAX", "4"))
+                        _MAX_PARALLEL_CALLAGENT = int(
+                            _os.environ.get("ATHENA_R1_PARALLEL_CALLAGENT_MAX", "4")
+                        )
                         workers = min(len(batch), max(1, _MAX_PARALLEL_CALLAGENT))
-                        logger.info(f"Parallelizing {len(batch)} CallAgent calls (max {workers} concurrent)")
-                        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="callagent") as ex:
+                        logger.info(
+                            f"Parallelizing {len(batch)} CallAgent calls (max {workers} concurrent)"
+                        )
+                        with ThreadPoolExecutor(
+                            max_workers=workers, thread_name_prefix="callagent"
+                        ) as ex:
                             futures = {ex.submit(_dispatch, idx): idx for idx in batch}
                             # Collect completions; commit in original index order
                             # so tool-result messages line up with their calls.
@@ -934,35 +1072,41 @@ class AthenaCore:
                 # calls and from positions we never reached after Finish).
                 call_results = [r for r in slotted_results if r is not None]
         else:
-            call_results.append({
-                "role": "tool",
-                "content": json.dumps({"content": "Not a valid function call, please check the function call format."})
-            })
+            call_results.append(
+                {
+                    "role": "tool",
+                    "content": json.dumps(
+                        {
+                            "content": "Not a valid function call, please check the function call format."
+                        }
+                    ),
+                }
+            )
 
-        revised_messages = [{
-            "role": "assistant",
-            "content": message.strip(),
-            "tool_calls": json.dumps(function_call_json)
-        }] + call_results
-
-
+        revised_messages = [
+            {
+                "role": "assistant",
+                "content": message.strip(),
+                "tool_calls": json.dumps(function_call_json),
+            }
+        ] + call_results
 
         should_stop = False
         final_result = None
 
-        if special_tool_call == 'Finish':
+        if special_tool_call == "Finish":
             should_stop = True
-            final_result = revised_messages[0]['content']
-        elif special_tool_call in ['RequireClarification', 'DirectResponse']:
+            final_result = revised_messages[0]["content"]
+        elif special_tool_call in ["RequireClarification", "DirectResponse"]:
             should_stop = True
-            final_result = call_results[0]['content'] if call_results else ''
+            final_result = call_results[0]["content"] if call_results else ""
 
         return {
-            'messages': revised_messages,
-            'tools_prompt': existing_tools_prompt,
-            'special_tool_call': special_tool_call,
-            'should_stop': should_stop,
-            'final_result': final_result
+            "messages": revised_messages,
+            "tools_prompt": existing_tools_prompt,
+            "special_tool_call": special_tool_call,
+            "should_stop": should_stop,
+            "final_result": final_result,
         }
 
     def _build_tool_result_message(self, call_result: str, call_id: str = None) -> dict:
@@ -970,35 +1114,46 @@ class AthenaCore:
         if call_id:
             return {
                 "role": "tool",
-                "content": json.dumps({"content": call_result, "call_id": call_id})
+                "content": json.dumps({"content": call_result, "call_id": call_id}),
             }
         else:
-            return {
-                "role": "tool",
-                "content": json.dumps({"content": call_result})
-            }
+            return {"role": "tool", "content": json.dumps({"content": call_result})}
 
-    def llm_infer(self, messages, temperature=0.1, tools=None,
-                  output_begin_string=None, max_new_tokens=2048,
-                  model=None, seed=None,
-                  check_token_status=False, top_p=0.95, top_k=20, min_p=0.0,
-                  model_name=None, repetition_penalty=None,
-                  presence_penalty=1.5, cancel_event=None):
+    def llm_infer(
+        self,
+        messages,
+        temperature=0.1,
+        tools=None,
+        output_begin_string=None,
+        max_new_tokens=2048,
+        model=None,
+        seed=None,
+        check_token_status=False,
+        top_p=0.95,
+        top_k=20,
+        min_p=0.0,
+        model_name=None,
+        repetition_penalty=None,
+        presence_penalty=1.5,
+        cancel_event=None,
+    ):
         # Qwen3-8B HF recommendation: top_p=0.95, top_k=20, min_p=0, T=0.6 (thinking),
         # presence_penalty 0-2 to suppress endless repetition. No repetition_penalty.
         # Env-var override for ablation runs:
-        if os.environ.get('INFER_PRESENCE_PENALTY') is not None:
-            v = float(os.environ['INFER_PRESENCE_PENALTY'])
+        if os.environ.get("INFER_PRESENCE_PENALTY") is not None:
+            v = float(os.environ["INFER_PRESENCE_PENALTY"])
             presence_penalty = v if v > 0 else None
-        if os.environ.get('INFER_REPETITION_PENALTY') is not None:
-            v = float(os.environ['INFER_REPETITION_PENALTY'])
+        if os.environ.get("INFER_REPETITION_PENALTY") is not None:
+            v = float(os.environ["INFER_REPETITION_PENALTY"])
             repetition_penalty = v if v > 0 else None
 
         def filter_message_keys(messages):
             allowed_keys = {"role", "content", "tools", "tool_calls"}
             filtered = []
             for msg in messages:
-                filtered.append({k: v for k, v in msg.items() if k in allowed_keys and v is not None})
+                filtered.append(
+                    {k: v for k, v in msg.items() if k in allowed_keys and v is not None}
+                )
             return filtered
 
         messages = copy.deepcopy(messages)
@@ -1006,7 +1161,8 @@ class AthenaCore:
         messages = convert_to_qwen_format(messages)
 
         prompt = self.chat_template.render(
-            messages=messages, tools=tools, add_generation_prompt=True)
+            messages=messages, tools=tools, add_generation_prompt=True
+        )
         if output_begin_string is not None:
             prompt += output_begin_string
 
@@ -1083,8 +1239,7 @@ class AthenaCore:
                     # fall through to the retry below. Once generation is
                     # underway we retire the watchdog and let the read-timeout
                     # cover the (working) inter-chunk case.
-                    _first_chunk_to = float(os.environ.get(
-                        "ATHENA_VLLM_FIRST_CHUNK_TIMEOUT", "90"))
+                    _first_chunk_to = float(os.environ.get("ATHENA_VLLM_FIRST_CHUNK_TIMEOUT", "90"))
                     _wd_lock = threading.Lock()
                     _wd_closed = [False]
 
@@ -1098,8 +1253,12 @@ class AthenaCore:
                                     _s.close()
                                 except Exception:  # noqa: BLE001
                                     pass
-                    _timer = (threading.Timer(_first_chunk_to, _close_stuck_stream)
-                              if _first_chunk_to > 0 else None)
+
+                    _timer = (
+                        threading.Timer(_first_chunk_to, _close_stuck_stream)
+                        if _first_chunk_to > 0
+                        else None
+                    )
                     if _timer is not None:
                         _timer.daemon = True
                         _timer.start()
@@ -1132,8 +1291,7 @@ class AthenaCore:
             except Exception as e:  # noqa: BLE001
                 _api_failed = True
                 output = ""
-                logger.info(
-                    f"[llm_infer] API error (attempt {_attempt + 1}/{_max_attempts}): {e}")
+                logger.info(f"[llm_infer] API error (attempt {_attempt + 1}/{_max_attempts}): {e}")
         if _api_failed and check_token_status:
             return None, True
 
@@ -1144,7 +1302,11 @@ class AthenaCore:
 
     def _get_backend_for_level(self, level: int) -> str:
         """Return backend name for a given agent nesting level."""
-        backend = self.backend_by_level.get(level, self.backend_default) if hasattr(self, "backend_by_level") else self.backend_default
+        backend = (
+            self.backend_by_level.get(level, self.backend_default)
+            if hasattr(self, "backend_by_level")
+            else self.backend_default
+        )
         if backend is None:
             backend = "athena"
         backend = str(backend).strip().lower()
@@ -1152,12 +1314,15 @@ class AthenaCore:
             backend = "athena"
         return backend
 
-    def gpt_llm_infer(self, messages: List[Dict[str, Any]],
-                      temperature: float = 1.0,
-                      tools: Any = None,
-                      max_new_tokens: int = 8192,
-                      top_p: float = 1.0,
-                      backend: str = "gpt") -> str:
+    def gpt_llm_infer(
+        self,
+        messages: List[Dict[str, Any]],
+        temperature: float = 1.0,
+        tools: Any = None,
+        max_new_tokens: int = 8192,
+        top_p: float = 1.0,
+        backend: str = "gpt",
+    ) -> str:
         """OpenAI-compatible chat backend inference (GPT via Azure, or Gemini).
 
         Tools are serialized into the system prompt (the ATHENA-R1 prompt
@@ -1170,19 +1335,23 @@ class AthenaCore:
 
         tools_blob = self._serialize_tools_for_gpt(tools)
         system_prompt = (
-            f"{self.gpt_planning_prompt}\n\n"
-            "## Available tools (serialized)\n"
-            f"{tools_blob}\n"
+            f"{self.gpt_planning_prompt}\n\n## Available tools (serialized)\n{tools_blob}\n"
         )
 
         request_messages = [{"role": "system", "content": system_prompt}] + gpt_messages_wo_system
 
         client = self.gemini_client if backend == "gemini" else self.gpt_client
         model = self.backend_models.get(backend, "gpt-5")
-        responses = client.chat.completions.create(
-            model=model,
-            messages=request_messages,
-        )
+        try:
+            responses = client.chat.completions.create(
+                model=model,
+                messages=request_messages,
+            )
+        except Exception as exc:
+            # Surface API failures (quota/rate-limit/auth) as a clean final
+            # answer instead of crashing the streaming runner with a raw
+            # traceback (which the UI shows as a hung, tool-less run).
+            return self._external_api_error_message(backend, model, exc)
         msg = responses.choices[0].message
         raw_content = msg.content
         answer = (raw_content or "").strip()
@@ -1225,11 +1394,14 @@ class AthenaCore:
 
         return answer
 
-    def claude_llm_infer(self, messages: List[Dict[str, Any]],
-                         temperature: float = 1.0,
-                         tools: Any = None,
-                         max_new_tokens: int = 8192,
-                         top_p: float = 1.0) -> str:
+    def claude_llm_infer(
+        self,
+        messages: List[Dict[str, Any]],
+        temperature: float = 1.0,
+        tools: Any = None,
+        max_new_tokens: int = 8192,
+        top_p: float = 1.0,
+    ) -> str:
         """Claude backend inference via the official Anthropic SDK.
 
         Mirrors :meth:`gpt_llm_infer`: the tool set is serialized into the
@@ -1250,28 +1422,59 @@ class AthenaCore:
 
         tools_blob = self._serialize_tools_for_gpt(tools)
         system_prompt = (
-            f"{self.gpt_planning_prompt}\n\n"
-            "## Available tools (serialized)\n"
-            f"{tools_blob}\n"
+            f"{self.gpt_planning_prompt}\n\n## Available tools (serialized)\n{tools_blob}\n"
         )
 
         model = self.backend_models.get("claude", "claude-opus-4-8")
-        resp = self.claude_client.messages.create(
-            model=model,
-            max_tokens=max(1024, int(max_new_tokens)),
-            system=system_prompt,
-            messages=chat_msgs,
-        )
+        try:
+            resp = self.claude_client.messages.create(
+                model=model,
+                max_tokens=max(1024, int(max_new_tokens)),
+                system=system_prompt,
+                messages=chat_msgs,
+            )
+        except Exception as exc:
+            return self._external_api_error_message("claude", model, exc)
         # Guard the refusal stop reason before reading content blocks.
         if getattr(resp, "stop_reason", None) == "refusal":
             logger.info("Claude declined the request (stop_reason=refusal).")
             return "The model declined to answer this request."
         answer = "".join(
-            getattr(b, "text", "") for b in resp.content
-            if getattr(b, "type", None) == "text"
+            getattr(b, "text", "") for b in resp.content if getattr(b, "type", None) == "text"
         ).strip()
         logger.info(f"claude: {answer}")
         return answer
+
+    def _external_api_error_message(self, backend: str, model: str, exc: Exception) -> str:
+        """Turn an API SDK exception into a clear, non-crashing final answer.
+
+        Returned text carries no ``<tool_call>``, so the round loop treats it as
+        the final answer and stops — the user sees an actionable message
+        immediately instead of a hung, tool-less run.
+        """
+        text = str(exc)
+        status = getattr(exc, "status_code", None) or getattr(
+            getattr(exc, "response", None), "status_code", None
+        )
+        low = text.lower()
+        hint = ""
+        if status == 429 or "quota" in low or "rate limit" in low or "resource_exhausted" in low:
+            if backend == "gemini" and "pro" in model:
+                hint = (
+                    " The Gemini free tier does not include this model — switch the "
+                    "model to `gemini-2.5-flash` in Settings, or enable billing for Pro."
+                )
+            else:
+                hint = " Quota/rate limit hit — wait and retry, pick a smaller model, or check billing."
+        elif (
+            status in (401, 403) or "api key" in low or "unauthorized" in low or "permission" in low
+        ):
+            hint = f" Check the {backend} API key / permissions."
+        logger.warning(f"{backend} API error (status={status}): {text[:200]}")
+        return (
+            f"⚠️ The {backend} backend (model `{model}`) returned an error.{hint}\n\n"
+            f"Details: {text[:400]}"
+        )
 
     def _serialize_tools_for_gpt(self, tools: Any) -> str:
         """Serialize tool prompt objects into a string for GPT context."""
@@ -1300,10 +1503,19 @@ class AthenaCore:
                 gpt_messages.append({"role": "user", "content": content})
         return gpt_messages
 
-    def _generate_with_retry(self, conversation, tools, temperature,
-                            max_new_tokens, top_p, top_k, min_p,
-                            backend: str = "athena", seed=None,
-                            cancel_event=None):
+    def _generate_with_retry(
+        self,
+        conversation,
+        tools,
+        temperature,
+        max_new_tokens,
+        top_p,
+        top_k,
+        min_p,
+        backend: str = "athena",
+        seed=None,
+        cancel_event=None,
+    ):
         """Generate output with automatic retry on tool call format errors."""
         retry_count = 0
         output_begin_string = None
@@ -1325,10 +1537,12 @@ class AthenaCore:
             if backend != "athena":
                 conv_for_ext = conversation
                 if retry_count > 0:
-                    conv_for_ext = list(conversation) + [{
-                        "role": "user",
-                        "content": "Your previous tool-call formatting was invalid. Output again following the STRICT ATHENA-R1 tool-call protocol."
-                    }]
+                    conv_for_ext = list(conversation) + [
+                        {
+                            "role": "user",
+                            "content": "Your previous tool-call formatting was invalid. Output again following the STRICT ATHENA-R1 tool-call protocol.",
+                        }
+                    ]
                 if backend == "claude":
                     output_str = self.claude_llm_infer(
                         messages=conv_for_ext,
@@ -1356,7 +1570,9 @@ class AthenaCore:
                     max_new_tokens=max_new_tokens,
                     seed=seed,
                     check_token_status=True,
-                    top_p=top_p, top_k=top_k, min_p=min_p,
+                    top_p=top_p,
+                    top_k=top_k,
+                    min_p=min_p,
                     cancel_event=cancel_event,
                 )
 
@@ -1373,22 +1589,31 @@ class AthenaCore:
             think_close_count = full_output.count("</think>")
             if think_close_count >= 2:
                 first_close = full_output.find("</think>")
-                after_first = full_output[first_close + len("</think>"):]
+                after_first = full_output[first_close + len("</think>") :]
                 # Check if a <tool_call> follows the first </think>
                 tool_match = after_first.find("<tool_call>")
                 if tool_match != -1:
                     # Keep everything up to and including the tool_call block
                     tool_end = after_first.find("</tool_call>")
                     if tool_end != -1:
-                        full_output = full_output[:first_close + len("</think>")] + after_first[:tool_end + len("</tool_call>")]
+                        full_output = (
+                            full_output[: first_close + len("</think>")]
+                            + after_first[: tool_end + len("</tool_call>")]
+                        )
                     else:
-                        full_output = full_output[:first_close + len("</think>")] + after_first[:tool_match + after_first[tool_match:].find("\n}") + 2]
+                        full_output = (
+                            full_output[: first_close + len("</think>")]
+                            + after_first[: tool_match + after_first[tool_match:].find("\n}") + 2]
+                        )
                 else:
                     # No tool_call — keep just up to after first </think>
                     # Find any final answer text before the next </think>
                     second_close = after_first.find("</think>")
                     if second_close != -1:
-                        full_output = full_output[:first_close + len("</think>")] + after_first[:second_close].rstrip()
+                        full_output = (
+                            full_output[: first_close + len("</think>")]
+                            + after_first[:second_close].rstrip()
+                        )
                     # else: only content after first </think>, keep as-is
                 logger.info(f"[anti-repetition] Truncated output: {think_close_count} </think> → 1")
 
@@ -1396,7 +1621,9 @@ class AthenaCore:
             if backend != "athena" and "<think>" in full_output:
                 if retry_count < self.tool_call_max_retries:
                     retry_count += 1
-                    logger.info(f"⚠️  {backend} format error (<think> tags forbidden), retrying ({retry_count}/{self.tool_call_max_retries})...")
+                    logger.info(
+                        f"⚠️  {backend} format error (<think> tags forbidden), retrying ({retry_count}/{self.tool_call_max_retries})..."
+                    )
                     continue
                 return full_output, token_overflow
 
@@ -1404,7 +1631,9 @@ class AthenaCore:
             if "[TOOL_CALLS]" in full_output and "<tool_call>" not in full_output:
                 if retry_count < self.tool_call_max_retries:
                     retry_count += 1
-                    logger.info(f"⚠️  Tool call format error, retrying ({retry_count}/{self.tool_call_max_retries})...")
+                    logger.info(
+                        f"⚠️  Tool call format error, retrying ({retry_count}/{self.tool_call_max_retries})..."
+                    )
                     continue
                 return full_output, token_overflow
 
@@ -1426,34 +1655,54 @@ class AthenaCore:
 
                 # Format error - retry
                 if retry_count < self.tool_call_max_retries:
-                    prefix_text = full_output[:tool_call_start] if tool_call_start != -1 else full_output
+                    prefix_text = (
+                        full_output[:tool_call_start] if tool_call_start != -1 else full_output
+                    )
                     if backend == "athena":
                         output_begin_string = prefix_text
                     retry_count += 1
-                    logger.info(f"⚠️  Tool call format error, retrying ({retry_count}/{self.tool_call_max_retries})...")
+                    logger.info(
+                        f"⚠️  Tool call format error, retrying ({retry_count}/{self.tool_call_max_retries})..."
+                    )
                     continue
 
             return full_output, token_overflow
 
         return full_output, token_overflow
 
-    def get_answer_based_on_unfinished_reasoning(self, conversation, temperature, max_new_tokens,
-                                                 outputs=None, return_full_thought=False,
-                                                 top_p=0.95, top_k=20, min_p=0.0):
-        if conversation[-1]['role'] == 'assistant':
+    def get_answer_based_on_unfinished_reasoning(
+        self,
+        conversation,
+        temperature,
+        max_new_tokens,
+        outputs=None,
+        return_full_thought=False,
+        top_p=0.95,
+        top_k=20,
+        min_p=0.0,
+    ):
+        if conversation[-1]["role"] == "assistant":
             conversation.append(
-                {'role': 'tool', 'content': 'Errors happen during the function call, please come up with the final answer with the current information.'})
+                {
+                    "role": "tool",
+                    "content": "Errors happen during the function call, please come up with the final answer with the current information.",
+                }
+            )
 
         finish_tools_prompt = self.add_special_tools([], call_agent=False, call_agent_level=0)
-        finish_tools_prompt = [t for t in finish_tools_prompt if 'Finish' in str(t)]
+        finish_tools_prompt = [t for t in finish_tools_prompt if "Finish" in str(t)]
 
-        final_thought = 'Since I cannot continue reasoning, I will provide the final answer based on the current information and general knowledge.\n\n[FinalAnswer]'
-        last_outputs_str = self.llm_infer(messages=conversation,
-                                          temperature=temperature,
-                                          tools=finish_tools_prompt,
-                                          output_begin_string=final_thought,
-                                          max_new_tokens=max_new_tokens,
-                                          top_p=top_p, top_k=top_k, min_p=min_p)
+        final_thought = "Since I cannot continue reasoning, I will provide the final answer based on the current information and general knowledge.\n\n[FinalAnswer]"
+        last_outputs_str = self.llm_infer(
+            messages=conversation,
+            temperature=temperature,
+            tools=finish_tools_prompt,
+            output_begin_string=final_thought,
+            max_new_tokens=max_new_tokens,
+            top_p=top_p,
+            top_k=top_k,
+            min_p=min_p,
+        )
         if return_full_thought:
             return final_thought + last_outputs_str
         return last_outputs_str
@@ -1462,11 +1711,21 @@ class AthenaCore:
         """Char budget for the report digest: the context window minus room for
         the system prompt/template and the report output, converted chars→tokens."""
         from athena_r1._report import _CHARS_PER_TOKEN
+
         tokens = max(2000, (self.max_token or 32768) - max_new_tokens - 800)
         return int(tokens * _CHARS_PER_TOKEN)
 
-    def _stream_completion(self, messages, *, temperature=0.7, max_new_tokens=4096,
-                           top_p=0.95, top_k=20, min_p=0.0, cancel_event=None):
+    def _stream_completion(
+        self,
+        messages,
+        *,
+        temperature=0.7,
+        max_new_tokens=4096,
+        top_p=0.95,
+        top_k=20,
+        min_p=0.0,
+        cancel_event=None,
+    ):
         """Yield text chunks for a single completion.
 
         A deliberately self-contained streaming helper (a simpler cousin of
@@ -1477,8 +1736,7 @@ class AthenaCore:
         import copy as _copy
 
         msgs = convert_to_qwen_format(_copy.deepcopy(messages))
-        prompt = self.chat_template.render(
-            messages=msgs, tools=None, add_generation_prompt=True)
+        prompt = self.chat_template.render(messages=msgs, tools=None, add_generation_prompt=True)
         kwargs = {
             "model": self.model_name,
             "prompt": prompt,
@@ -1494,8 +1752,7 @@ class AthenaCore:
         # path would hang forever if vLLM accepts the request but never emits a
         # first chunk. The timer closes the stream so __next__() raises and the
         # caller sees a fast error instead of an indefinite hang.
-        _first_chunk_to = float(os.environ.get(
-            "ATHENA_VLLM_FIRST_CHUNK_TIMEOUT", "90"))
+        _first_chunk_to = float(os.environ.get("ATHENA_VLLM_FIRST_CHUNK_TIMEOUT", "90"))
         _wd_lock = threading.Lock()
         _wd_closed = [False]
 
@@ -1507,8 +1764,10 @@ class AthenaCore:
                         _s.close()
                     except Exception:  # noqa: BLE001
                         pass
-        _timer = (threading.Timer(_first_chunk_to, _close_stuck_stream)
-                  if _first_chunk_to > 0 else None)
+
+        _timer = (
+            threading.Timer(_first_chunk_to, _close_stuck_stream) if _first_chunk_to > 0 else None
+        )
         if _timer is not None:
             _timer.daemon = True
             _timer.start()
@@ -1535,11 +1794,21 @@ class AthenaCore:
 
     _REPORT_EMPTY_FALLBACK = (
         "I couldn't generate a detailed report from this run's trace. "
-        "Please try again or ask a more specific question.")
+        "Please try again or ask a more specific question."
+    )
 
-    def report_snapshots(self, question, digest, *, temperature=0.7,
-                         max_new_tokens=4096, top_p=0.95, top_k=20, min_p=0.0,
-                         cancel_event=None):
+    def report_snapshots(
+        self,
+        question,
+        digest,
+        *,
+        temperature=0.7,
+        max_new_tokens=4096,
+        top_p=0.95,
+        top_k=20,
+        min_p=0.0,
+        cancel_event=None,
+    ):
         """Yield progressively-cleaned report snapshots as generation proceeds.
 
         Each yielded value is the FULL cleaned report-so-far (REPLACE, not
@@ -1552,8 +1821,8 @@ class AthenaCore:
         The agent-trained model treats this out-of-distribution prompt loosely:
         it drafts inside a <think> block and re-emits the report several times,
         so we stop early once it starts repeating (frees the GPU)."""
-        from athena_r1._report import (
-            REPORT_SYSTEM_PROMPT, clean_report, valid_source_labels)
+        from athena_r1._report import REPORT_SYSTEM_PROMPT, clean_report, valid_source_labels
+
         # The only citation labels the report may keep — anything else (e.g. a
         # label copied from the prompt's few-shot example) is stripped.
         valid_sources = valid_source_labels(digest)
@@ -1576,8 +1845,14 @@ class AthenaCore:
         emitted_at = 0
         last_snap = ""
         for chunk in self._stream_completion(
-                messages, temperature=temperature, max_new_tokens=max_new_tokens,
-                top_p=top_p, top_k=top_k, min_p=min_p, cancel_event=cancel_event):
+            messages,
+            temperature=temperature,
+            max_new_tokens=max_new_tokens,
+            top_p=top_p,
+            top_k=top_k,
+            min_p=min_p,
+            cancel_event=cancel_event,
+        ):
             if not chunk:
                 continue
             raw += chunk
@@ -1605,17 +1880,32 @@ class AthenaCore:
         elif final != last_snap:
             yield final
 
-    def generate_report(self, question, digest, *, temperature=0.7,
-                        max_new_tokens=4096, top_p=0.95, top_k=20, min_p=0.0,
-                        cancel_event=None):
+    def generate_report(
+        self,
+        question,
+        digest,
+        *,
+        temperature=0.7,
+        max_new_tokens=4096,
+        top_p=0.95,
+        top_k=20,
+        min_p=0.0,
+        cancel_event=None,
+    ):
         """Single-yield form: the FINAL cleaned report only. Used by the Python
         API and the OpenAI-compat server (where the caller joins the result).
         Internally consumes report_snapshots() and emits just the last one."""
         final = self._REPORT_EMPTY_FALLBACK
         for snap in self.report_snapshots(
-                question, digest, temperature=temperature,
-                max_new_tokens=max_new_tokens, top_p=top_p, top_k=top_k,
-                min_p=min_p, cancel_event=cancel_event):
+            question,
+            digest,
+            temperature=temperature,
+            max_new_tokens=max_new_tokens,
+            top_p=top_p,
+            top_k=top_k,
+            min_p=min_p,
+            cancel_event=cancel_event,
+        ):
             final = snap
         yield final
 
@@ -1659,9 +1949,14 @@ class AthenaCore:
                     proc.reset_counter()
 
         cancel_event = kwargs.pop("cancel_event", None)
-        with AgentRunContext(self, message, call_agent, call_agent_level,
-                             progress_callback=progress_callback,
-                             agent_id=agent_id) as ctx:
+        with AgentRunContext(
+            self,
+            message,
+            call_agent,
+            call_agent_level,
+            progress_callback=progress_callback,
+            agent_id=agent_id,
+        ) as ctx:
             # Stash on ctx so CallAgentProcessor can propagate it to child
             # recursive runs. Without this, aborting the top-level run
             # leaves sub-agents (and sub-sub-agents) running to completion.
@@ -1672,9 +1967,8 @@ class AthenaCore:
                 # so concurrent requests on a shared agent instance don't
                 # interfere with each other. Older callers can still set
                 # the legacy instance flag `_cancel_requested`.
-                if (
-                    (cancel_event is not None and cancel_event.is_set())
-                    or getattr(self, "_cancel_requested", False)
+                if (cancel_event is not None and cancel_event.is_set()) or getattr(
+                    self, "_cancel_requested", False
                 ):
                     logger.info("Cancellation requested; force-finishing.")
                     forced = ctx.handle_force_finish(
@@ -1688,7 +1982,9 @@ class AthenaCore:
                     # entirely. Mirrors the max_round force-finish emit below.
                     ctx._emit(
                         "final_answer",
-                        content=forced if not return_conversation else (forced[0] if forced else None),
+                        content=forced
+                        if not return_conversation
+                        else (forced[0] if forced else None),
                         forced=True,
                     )
                     return forced
@@ -1699,7 +1995,8 @@ class AthenaCore:
                 # by process_tool_calls in this round.
                 prev_conv_len = len(ctx.conversation)
                 should_stop, result = ctx.process_tool_calls(
-                    temperature, max_new_tokens, top_p, top_k, min_p, return_conversation)
+                    temperature, max_new_tokens, top_p, top_k, min_p, return_conversation
+                )
                 # Emit any new tool-result messages appended this round.
                 for msg in ctx.conversation[prev_conv_len:]:
                     if isinstance(msg, dict) and msg.get("role") in ("tool", "function"):
@@ -1709,46 +2006,75 @@ class AthenaCore:
                             content=msg.get("content", ""),
                         )
                 if should_stop:
-                    ctx._emit("final_answer", content=result if not return_conversation else result[0])
+                    ctx._emit(
+                        "final_answer", content=result if not return_conversation else result[0]
+                    )
                     return result
                 # Preemptive Token Validation (Strategy 1)
                 current_limit = 0.7
                 last_outputs_str = None
-                
+
                 # Iteratively lower the safe limit if the model continues to crash
                 while current_limit >= 0.3:
                     if current_limit < 0.7:
-                        logger.info(f" Model generation crashed or context exhausted. Retrying Strategy 1 with stricter {current_limit:.1f} limit... ")
-                        
-                    space_ensured = ctx.ensure_context_space(temperature, max_new_tokens, top_p, top_k, min_p, return_conversation, dynamic_limit=current_limit, compact=False)
+                        logger.info(
+                            f" Model generation crashed or context exhausted. Retrying Strategy 1 with stricter {current_limit:.1f} limit... "
+                        )
+
+                    space_ensured = ctx.ensure_context_space(
+                        temperature,
+                        max_new_tokens,
+                        top_p,
+                        top_k,
+                        min_p,
+                        return_conversation,
+                        dynamic_limit=current_limit,
+                        compact=False,
+                    )
 
                     if space_ensured:
                         last_outputs_str = ctx.generate_next_output(
-                            temperature, max_new_tokens, top_p, top_k, min_p)
-                            
+                            temperature, max_new_tokens, top_p, top_k, min_p
+                        )
+
                         # If execution succeeded, break out of loop
                         if last_outputs_str is not None:
                             break
-                            
+
                     current_limit -= 0.2
-                        
+
                 # If we've exhausted Strategy 1 loop limits and it STILL crashes, trigger Strategy 2
                 if last_outputs_str is None:
-                    logger.info(" Model generation crashed at minimum limit. Triggering Strategy 2 (Context Checkpoint). ")
-                    ctx.ensure_context_space(temperature, max_new_tokens, top_p, top_k, min_p, return_conversation, compact=True)
-                    
+                    logger.info(
+                        " Model generation crashed at minimum limit. Triggering Strategy 2 (Context Checkpoint). "
+                    )
+                    ctx.ensure_context_space(
+                        temperature,
+                        max_new_tokens,
+                        top_p,
+                        top_k,
+                        min_p,
+                        return_conversation,
+                        compact=True,
+                    )
+
                     # Having successfully checkpointed, explicitly generate what fits in the new context
-                    last_outputs_str = ctx.generate_next_output(temperature, max_new_tokens, top_p, top_k, min_p)
-                    
+                    last_outputs_str = ctx.generate_next_output(
+                        temperature, max_new_tokens, top_p, top_k, min_p
+                    )
+
                     if last_outputs_str is None:
                         # Strategy 2 still couldn't fit the prompt. Rather than
                         # surface a bare "token overflow" error, run the robust
                         # tiered fallback that ALWAYS synthesizes an answer
                         # (hard-trim tool outputs → minimal context → direct
                         # answer). Guarantees the user gets a real response.
-                        logger.info(" Strategy 2 overflowed; entering robust emergency answer synthesis. ")
+                        logger.info(
+                            " Strategy 2 overflowed; entering robust emergency answer synthesis. "
+                        )
                         answer = ctx._emergency_final_answer(
-                            temperature, max_new_tokens, top_p, top_k, min_p)
+                            temperature, max_new_tokens, top_p, top_k, min_p
+                        )
                         # Emit BOTH events so the UI shows the answer in the
                         # current round (reasoning → .speech) AND in the
                         # final-answer panel (RUN_FINISHED extracts last speech).
@@ -1768,7 +2094,7 @@ class AthenaCore:
                     ctx._emit("reasoning", round=round_num + 1, content=last_outputs_str)
                     # Detect explicit tool_call blocks so the UI can highlight them.
                     for m in re.finditer(
-                        r'<tool_call>(.*?)</tool_call>',
+                        r"<tool_call>(.*?)</tool_call>",
                         last_outputs_str,
                         flags=re.DOTALL,
                     ):
@@ -1797,27 +2123,35 @@ class AthenaCore:
 
                 ctx.last_outputs.append(last_outputs_str)
 
-            forced = ctx.handle_force_finish(temperature, max_new_tokens, top_p, top_k, min_p, return_conversation)
+            forced = ctx.handle_force_finish(
+                temperature, max_new_tokens, top_p, top_k, min_p, return_conversation
+            )
             # Guarantee a non-empty answer even if force-finish is disabled or
             # its synthesis came back empty (overflow / API hiccup) — fall back
             # to the robust tiered emergency synthesis. The user always gets a
             # real response, never a blank "(no final answer)".
-            forced_text = (forced[0] if (return_conversation and isinstance(forced, tuple)) else forced)
+            forced_text = (
+                forced[0] if (return_conversation and isinstance(forced, tuple)) else forced
+            )
             if not (forced_text and str(forced_text).strip()):
                 answer = ctx._emergency_final_answer(
-                    temperature, max_new_tokens, top_p, top_k, min_p)
+                    temperature, max_new_tokens, top_p, top_k, min_p
+                )
                 forced = (answer, ctx.conversation) if return_conversation else answer
                 forced_text = answer
             ctx._emit("final_answer", content=forced_text, forced=True)
             return forced
 
-    def run_summary_agent(self, thought_calls: str,
-                         function_response: str,
-                         temperature: float,
-                         max_new_tokens: int,
-                         top_p=0.95,
-                         top_k=20,
-                         min_p=0.0) -> str:
+    def run_summary_agent(
+        self,
+        thought_calls: str,
+        function_response: str,
+        temperature: float,
+        max_new_tokens: int,
+        top_p=0.95,
+        top_k=20,
+        min_p=0.0,
+    ) -> str:
         """Summarize tool outputs"""
         logger.info("Summarized Tool Result:")
 
@@ -1837,16 +2171,15 @@ Based on the Thought and function calls, and the function calls' responses, you 
 
         # Calculate approximate token length of the prompt
         prompt_with_content = base_prompt_template.format(
-            thought_calls=thought_calls,
-            function_response=function_response
+            thought_calls=thought_calls, function_response=function_response
         )
 
         if self.summary_format_args:
-            temperature = self.summary_format_args.get('temperature', temperature)
-            max_new_tokens = self.summary_format_args.get('max_new_tokens', max_new_tokens)
-            top_p = self.summary_format_args.get('top_p', top_p)
-            top_k = self.summary_format_args.get('top_k', top_k)
-            min_p = self.summary_format_args.get('min_p', min_p)
+            temperature = self.summary_format_args.get("temperature", temperature)
+            max_new_tokens = self.summary_format_args.get("max_new_tokens", max_new_tokens)
+            top_p = self.summary_format_args.get("top_p", top_p)
+            top_k = self.summary_format_args.get("top_k", top_k)
+            min_p = self.summary_format_args.get("min_p", min_p)
 
         # If prompt length is within limits, process normally.
         # ``self.max_token`` is a TOKEN budget, but ``len(prompt_with_content)``
@@ -1861,21 +2194,31 @@ Based on the Thought and function calls, and the function calls' responses, you 
             logger.info("start standard llm summary inference")
 
             # Check if summary_format_model exists; use main model if not
-            model = self.summary_format_model if self.summary_format_model is not None else self.model
-            model_name = self.summary_format_model_name if self.summary_format_model_name is not None else self.model_name
+            model = (
+                self.summary_format_model if self.summary_format_model is not None else self.model
+            )
+            model_name = (
+                self.summary_format_model_name
+                if self.summary_format_model_name is not None
+                else self.model_name
+            )
 
-            output = self.llm_infer(messages=conversation,
-                                  output_begin_string="<think>\n\n</think>\n\n",
-                                  temperature=temperature,
-                                  tools=None,
-                                  max_new_tokens=max_new_tokens,
-                                  top_p=top_p, top_k=top_k, min_p=min_p,
-                                  model=model,
-                                  model_name=model_name)
+            output = self.llm_infer(
+                messages=conversation,
+                output_begin_string="<think>\n\n</think>\n\n",
+                temperature=temperature,
+                tools=None,
+                max_new_tokens=max_new_tokens,
+                top_p=top_p,
+                top_k=top_k,
+                min_p=min_p,
+                model=model,
+                model_name=model_name,
+            )
             if "</think>" in output:
                 output = output.split("</think>")[-1].strip()
-            if '[' in output:
-                output = output.split('[')[0]
+            if "[" in output:
+                output = output.split("[")[0]
             logger.info("end standard llm summary inference")
             return output
 
@@ -1886,32 +2229,42 @@ Based on the Thought and function calls, and the function calls' responses, you 
         # Convert token limit to characters using compress_ratio (chars per token)
         # Reserve ~2000 tokens for prompt template + chat overhead
         chunk_size = int((self.max_token - 2000) * self.compress_ratio * 0.8)
-        chunks = [function_response[i:i + chunk_size] for i in range(0, len(function_response), chunk_size)]
+        chunks = [
+            function_response[i : i + chunk_size]
+            for i in range(0, len(function_response), chunk_size)
+        ]
 
         # Process each chunk and collect summaries
         chunk_summaries = []
         model = self.summary_format_model if self.summary_format_model is not None else self.model
-        model_name = self.summary_format_model_name if self.summary_format_model_name is not None else self.model_name
+        model_name = (
+            self.summary_format_model_name
+            if self.summary_format_model_name is not None
+            else self.model_name
+        )
 
         for i, chunk in enumerate(chunks):
             chunk_prompt = base_prompt_template.format(
-                thought_calls=thought_calls,
-                function_response=chunk
+                thought_calls=thought_calls, function_response=chunk
             )
 
             conversation = [{"role": "user", "content": chunk_prompt}]
-            chunk_output = self.llm_infer(messages=conversation,
-                                        output_begin_string="<think>\n\n</think>\n\n",
-                                        temperature=temperature,
-                                        tools=None,
-                                        max_new_tokens=max_new_tokens,
-                                        top_p=top_p, top_k=top_k, min_p=min_p,
-                                        model=model,
-                                        model_name=model_name)
+            chunk_output = self.llm_infer(
+                messages=conversation,
+                output_begin_string="<think>\n\n</think>\n\n",
+                temperature=temperature,
+                tools=None,
+                max_new_tokens=max_new_tokens,
+                top_p=top_p,
+                top_k=top_k,
+                min_p=min_p,
+                model=model,
+                model_name=model_name,
+            )
             if "</think>" in chunk_output:
                 chunk_output = chunk_output.split("</think>")[-1].strip()
-            if '[' in chunk_output:
-                chunk_output = chunk_output.split('[')[0]
+            if "[" in chunk_output:
+                chunk_output = chunk_output.split("[")[0]
             chunk_summaries.append(chunk_output)
 
         # If we only have one chunk summary, return it directly
@@ -1921,8 +2274,6 @@ Based on the Thought and function calls, and the function calls' responses, you 
         # Combine chunk summaries into a final summary
         combined_summary = " ".join(chunk_summaries)
         return combined_summary
-
-
 
     def run_format_agent_full_history(
         self,
@@ -1950,38 +2301,46 @@ Based on the Thought and function calls, and the function calls' responses, you 
         """
         logger.info("start format agent (full-history v2)")
         if not conversation_history:
-            logger.info("[full-history v2] no conversation_history provided; cannot match training format")
+            logger.info(
+                "[full-history v2] no conversation_history provided; cannot match training format"
+            )
             return "Error"
 
         # Build messages list = full history + training-style mapping prompt
         conversation = list(conversation_history)
-        conversation.append({
-            "role": "user",
-            "content": (
-                f"Here are the options: {options_str}. Based on your previous "
-                f"answer, please select the correct option. Do not use any tools."
-            ),
-        })
+        conversation.append(
+            {
+                "role": "user",
+                "content": (
+                    f"Here are the options: {options_str}. Based on your previous "
+                    f"answer, please select the correct option. Do not use any tools."
+                ),
+            }
+        )
 
         if self.summary_format_args:
-            temperature = self.summary_format_args.get('temperature', temperature)
-            max_new_tokens = self.summary_format_args.get('max_new_tokens', max_new_tokens)
-            top_p = self.summary_format_args.get('top_p', top_p)
-            top_k = self.summary_format_args.get('top_k', top_k)
-            min_p = self.summary_format_args.get('min_p', min_p)
+            temperature = self.summary_format_args.get("temperature", temperature)
+            max_new_tokens = self.summary_format_args.get("max_new_tokens", max_new_tokens)
+            top_p = self.summary_format_args.get("top_p", top_p)
+            top_k = self.summary_format_args.get("top_k", top_k)
+            min_p = self.summary_format_args.get("min_p", min_p)
 
         max_retries = 5
         final_extracted_answer = "Error"
 
         for attempt in range(max_retries):
             logger.info(f"[full-history v2] attempt {attempt + 1}/{max_retries}")
-            answer_text = self.llm_infer(messages=conversation,
-                                         temperature=temperature,
-                                         tools=None,
-                                         max_new_tokens=max_new_tokens,
-                                         top_p=top_p, top_k=top_k, min_p=min_p,
-                                         model=self.summary_format_model,
-                                         model_name=self.summary_format_model_name)
+            answer_text = self.llm_infer(
+                messages=conversation,
+                temperature=temperature,
+                tools=None,
+                max_new_tokens=max_new_tokens,
+                top_p=top_p,
+                top_k=top_k,
+                min_p=min_p,
+                model=self.summary_format_model,
+                model_name=self.summary_format_model_name,
+            )
             if not answer_text:
                 logger.info(f"[full-history v2] empty response, retrying")
                 continue
@@ -2000,16 +2359,22 @@ Based on the Thought and function calls, and the function calls' responses, you 
                     return text[0].upper()
 
             # "X: name" pattern
-            if len(text) >= 2 and text[1] == ':':
+            if len(text) >= 2 and text[1] == ":":
                 if text[0].upper() in "ABCDE":
                     return text[0].upper()
 
             # Search for "The answer is X" / "answer: X" patterns
-            for pattern in ["the answer is", "answer is:", "answer:", "final answer:",
-                            "the correct answer is", "the final answer is"]:
+            for pattern in [
+                "the answer is",
+                "answer is:",
+                "answer:",
+                "final answer:",
+                "the correct answer is",
+                "the final answer is",
+            ]:
                 idx = text.lower().find(pattern)
                 if idx >= 0:
-                    tail = text[idx + len(pattern):].strip()
+                    tail = text[idx + len(pattern) :].strip()
                     # Strip leading punctuation
                     while tail and not tail[0].isalpha():
                         tail = tail[1:]
@@ -2018,7 +2383,8 @@ Based on the Thought and function calls, and the function calls' responses, you 
 
             # Last resort: scan for first standalone A-E letter
             import re as _re
-            m = _re.search(r'\b([A-E])\b', text)
+
+            m = _re.search(r"\b([A-E])\b", text)
             if m:
                 return m.group(1)
 
@@ -2049,7 +2415,8 @@ Based on the Thought and function calls, and the function calls' responses, you 
         # Fast path: the agent already emitted an explicit letter.
         if answer:
             possible = (
-                answer.split("[FinalAnswer]")[-1] if "[FinalAnswer]" in answer
+                answer.split("[FinalAnswer]")[-1]
+                if "[FinalAnswer]" in answer
                 else (answer.split("\n\n")[-1] if "\n\n" in answer else answer.strip())
             )
             if len(possible) == 1 and possible in "ABCDE":
@@ -2061,12 +2428,8 @@ Based on the Thought and function calls, and the function calls' responses, you 
         if conversation_history:
             # Full-history mode: build the GPT prompt from the full reasoning
             # trace, then ask GPT to select the option.
-            conversation = self._build_gpt_mapping_from_history(
-                conversation_history, options_str
-            )
-            logger.info(
-                f"[gpt_format_agent] full-history mode, {len(conversation)} messages"
-            )
+            conversation = self._build_gpt_mapping_from_history(conversation_history, options_str)
+            logger.info(f"[gpt_format_agent] full-history mode, {len(conversation)} messages")
         else:
             # Legacy mode: question + final answer only. Kept for back-compat
             # with callers that don't have access to the full conversation.
@@ -2089,6 +2452,7 @@ Based on the Thought and function calls, and the function calls' responses, you 
         # Retry on transient Azure errors (APIConnectionError, APITimeoutError, 5xx).
         # Backoff: 2, 4, 8, 16 s — total worst-case ~30 s before giving up.
         import time as _time
+
         last_err = None
         for attempt in range(5):
             try:
@@ -2105,15 +2469,24 @@ Based on the Thought and function calls, and the function calls' responses, you 
             except Exception as e:
                 last_err = e
                 etype = type(e).__name__
-                if etype in ("APIConnectionError", "APITimeoutError", "RateLimitError",
-                             "InternalServerError", "APIError"):
-                    sleep_s = 2 * (2 ** attempt)
-                    logger.info(f"[run_gpt_format_agent] {etype}, retry {attempt+1}/5 after {sleep_s}s")
+                if etype in (
+                    "APIConnectionError",
+                    "APITimeoutError",
+                    "RateLimitError",
+                    "InternalServerError",
+                    "APIError",
+                ):
+                    sleep_s = 2 * (2**attempt)
+                    logger.info(
+                        f"[run_gpt_format_agent] {etype}, retry {attempt + 1}/5 after {sleep_s}s"
+                    )
                     _time.sleep(sleep_s)
                     continue
                 logger.info(f"[run_gpt_format_agent] GPT call failed: {etype}: {e}")
                 return None
-        logger.info(f"[run_gpt_format_agent] all 5 retries exhausted: {type(last_err).__name__}: {last_err}")
+        logger.info(
+            f"[run_gpt_format_agent] all 5 retries exhausted: {type(last_err).__name__}: {last_err}"
+        )
         return None
 
     def _build_gpt_mapping_from_history(self, conversation_history, options_message):
@@ -2123,25 +2496,27 @@ Based on the Thought and function calls, and the function calls' responses, you 
         asks GPT to select the option.
         """
         gpt_messages = []
-        gpt_messages.append({
-            "role": "system",
-            "content": "You are a helpful assistant. You will be shown a medical agent's "
-                       "full reasoning trace including its thoughts, tool calls, and tool results. "
-                       "Based on this trace, select the correct multiple choice answer."
-        })
+        gpt_messages.append(
+            {
+                "role": "system",
+                "content": "You are a helpful assistant. You will be shown a medical agent's "
+                "full reasoning trace including its thoughts, tool calls, and tool results. "
+                "Based on this trace, select the correct multiple choice answer.",
+            }
+        )
 
         # Build the full trace from conversation history
         trace_parts = []
         for turn in conversation_history:
-            role = turn.get('role', '')
-            content = turn.get('content', '')
-            if role == 'system':
+            role = turn.get("role", "")
+            content = turn.get("content", "")
+            if role == "system":
                 continue  # skip system prompts from the agent
-            elif role == 'user':
+            elif role == "user":
                 trace_parts.append(f"[User]: {content}")
-            elif role == 'assistant':
+            elif role == "assistant":
                 trace_parts.append(f"[Assistant]: {content}")
-            elif role == 'tool':
+            elif role == "tool":
                 # Truncate very long tool outputs to avoid hitting token limits
                 if len(content) > 2000:
                     content = content[:2000] + "... [truncated]"
@@ -2149,24 +2524,27 @@ Based on the Thought and function calls, and the function calls' responses, you 
 
         full_trace = "\n".join(trace_parts)
 
-        gpt_messages.append({
-            "role": "user",
-            "content": f"Here is the agent's full reasoning trace:\n\n{full_trace}\n\n"
-                       f"{options_message}\n"
-                       f"Based on the agent's reasoning above, select the correct option. "
-                       f"The answer is (must be a letter):"
-        })
+        gpt_messages.append(
+            {
+                "role": "user",
+                "content": f"Here is the agent's full reasoning trace:\n\n{full_trace}\n\n"
+                f"{options_message}\n"
+                f"Based on the agent's reasoning above, select the correct option. "
+                f"The answer is (must be a letter):",
+            }
+        )
 
         return gpt_messages
 
-
-
-    def run_context_summary_agent(self, conversation: list,
-                          temperature: float,
-                          max_new_tokens: int,
-                          top_p=0.95,
-                          top_k=20,
-                          min_p=0.0) -> str:
+    def run_context_summary_agent(
+        self,
+        conversation: list,
+        temperature: float,
+        max_new_tokens: int,
+        top_p=0.95,
+        top_k=20,
+        min_p=0.0,
+    ) -> str:
         """Run context summary agent"""
         logger.info("start context summary agent")
 
@@ -2179,17 +2557,19 @@ Based on the Thought and function calls, and the function calls' responses, you 
                 if role == "system":
                     continue
                 formatted += f"{role.upper()}: {content}\n\n"
-            return formatted.replace('"""', "\\\"\\\"\\\"")
+            return formatted.replace('"""', '\\"\\"\\"')
 
         formatted_conversation = format_conv(conversation)
 
         # Check length
         # Check length. 1 token ~= 3.5 chars. We want to stay well below 32k tokens.
-        SAFE_CHAR_LIMIT = 80000 
+        SAFE_CHAR_LIMIT = 80000
         HARD_CHAR_LIMIT = 100000
 
         if len(formatted_conversation) > SAFE_CHAR_LIMIT:
-            logger.info(f"Context too long ({len(formatted_conversation)} chars), attempting to compress...")
+            logger.info(
+                f"Context too long ({len(formatted_conversation)} chars), attempting to compress..."
+            )
 
             # Compress by summarizing tool results
             compressed_conversation = []
@@ -2204,72 +2584,81 @@ Based on the Thought and function calls, and the function calls' responses, you 
                     last_thought = content
 
                 if role == "tool" and len(content) > 3000:
-                     logger.info(f"Summarizing tool output of length {len(content)}...")
-                     summary = self.run_summary_agent(
-                         thought_calls=last_thought,
-                         function_response=content,
-                         temperature=0.1,
-                         max_new_tokens=10240
-                     )
-                     msg_copy['content'] = f"[Summarized Tool Output]: {summary}"
+                    logger.info(f"Summarizing tool output of length {len(content)}...")
+                    summary = self.run_summary_agent(
+                        thought_calls=last_thought,
+                        function_response=content,
+                        temperature=0.1,
+                        max_new_tokens=10240,
+                    )
+                    msg_copy["content"] = f"[Summarized Tool Output]: {summary}"
 
                 compressed_conversation.append(msg_copy)
 
             formatted_conversation = format_conv(compressed_conversation)
 
             if len(formatted_conversation) > SAFE_CHAR_LIMIT:
-                 logger.info(f"Still too long ({len(formatted_conversation)} chars), chunking linearly by rounds...")
-                 
-                 # Group messages into complete semantic rounds
-                 rounds = []
-                 current_round = []
-                 for msg in compressed_conversation:
-                     if msg.get('role') == 'user' and current_round:
-                         rounds.append(current_round)
-                         current_round = [msg]
-                     else:
-                         current_round.append(msg)
-                 if current_round:
-                     rounds.append(current_round)
+                logger.info(
+                    f"Still too long ({len(formatted_conversation)} chars), chunking linearly by rounds..."
+                )
 
-                 # Pack rounds into chunks that fit inside SAFE_CHAR_LIMIT
-                 chunks = []
-                 current_chunk = []
-                 current_len = 0
-                 
-                 for rnd in rounds:
-                     rnd_str = format_conv(rnd)
-                     if current_len + len(rnd_str) > SAFE_CHAR_LIMIT and current_chunk:
-                         chunks.append(current_chunk)
-                         current_chunk = rnd
-                         current_len = len(rnd_str)
-                     else:
-                         current_chunk.extend(rnd)
-                         current_len += len(rnd_str)
-                         
-                 if current_chunk:
-                     chunks.append(current_chunk)
-                     
-                 # If we somehow have 1 massive round that is larger than the limit, forcefully cut it
-                 if len(chunks) == 1:
-                     chunk1 = compressed_conversation[:len(compressed_conversation)//2]
-                     chunk2 = compressed_conversation[len(compressed_conversation)//2:]
-                     chunks = [chunk1, chunk2]
+                # Group messages into complete semantic rounds
+                rounds = []
+                current_round = []
+                for msg in compressed_conversation:
+                    if msg.get("role") == "user" and current_round:
+                        rounds.append(current_round)
+                        current_round = [msg]
+                    else:
+                        current_round.append(msg)
+                if current_round:
+                    rounds.append(current_round)
 
-                 # Summarize each chunk
-                 summaries = []
-                 for i, chunk in enumerate(chunks):
-                     logger.info(f"Summarizing chunk {i+1} of {len(chunks)}...")
-                     summaries.append(self.run_context_summary_agent(
-                         chunk, temperature, max_new_tokens, top_p, top_k, min_p
-                     ))
+                # Pack rounds into chunks that fit inside SAFE_CHAR_LIMIT
+                chunks = []
+                current_chunk = []
+                current_len = 0
 
-                 # Merge all summaries together
-                 new_conv = [{"role": "user", "content": "Please merge the following chronological summaries into one master summary."}]
-                 for summ in summaries:
-                     new_conv.append({"role": "assistant", "content": summ})
-                 
-                 formatted_conversation = format_conv(new_conv)
+                for rnd in rounds:
+                    rnd_str = format_conv(rnd)
+                    if current_len + len(rnd_str) > SAFE_CHAR_LIMIT and current_chunk:
+                        chunks.append(current_chunk)
+                        current_chunk = rnd
+                        current_len = len(rnd_str)
+                    else:
+                        current_chunk.extend(rnd)
+                        current_len += len(rnd_str)
+
+                if current_chunk:
+                    chunks.append(current_chunk)
+
+                # If we somehow have 1 massive round that is larger than the limit, forcefully cut it
+                if len(chunks) == 1:
+                    chunk1 = compressed_conversation[: len(compressed_conversation) // 2]
+                    chunk2 = compressed_conversation[len(compressed_conversation) // 2 :]
+                    chunks = [chunk1, chunk2]
+
+                # Summarize each chunk
+                summaries = []
+                for i, chunk in enumerate(chunks):
+                    logger.info(f"Summarizing chunk {i + 1} of {len(chunks)}...")
+                    summaries.append(
+                        self.run_context_summary_agent(
+                            chunk, temperature, max_new_tokens, top_p, top_k, min_p
+                        )
+                    )
+
+                # Merge all summaries together
+                new_conv = [
+                    {
+                        "role": "user",
+                        "content": "Please merge the following chronological summaries into one master summary.",
+                    }
+                ]
+                for summ in summaries:
+                    new_conv.append({"role": "assistant", "content": summ})
+
+                formatted_conversation = format_conv(new_conv)
 
         prompt_content = f"""Here is the conversation so far:
 \"\"\"
@@ -2280,23 +2669,29 @@ Now, please follow the instructions to create the handoff summary.
 """
 
         summary_conversation = []
-        summary_conversation = self.set_system_prompt(summary_conversation, self.context_summary_prompt)
+        summary_conversation = self.set_system_prompt(
+            summary_conversation, self.context_summary_prompt
+        )
         summary_conversation.append({"role": "user", "content": prompt_content})
 
         if self.summary_format_args:
-             temperature = self.summary_format_args.get('temperature', temperature)
-             max_new_tokens = self.summary_format_args.get('max_new_tokens', max_new_tokens)
-             top_p = self.summary_format_args.get('top_p', top_p)
-             top_k = self.summary_format_args.get('top_k', top_k)
-             min_p = self.summary_format_args.get('min_p', min_p)
+            temperature = self.summary_format_args.get("temperature", temperature)
+            max_new_tokens = self.summary_format_args.get("max_new_tokens", max_new_tokens)
+            top_p = self.summary_format_args.get("top_p", top_p)
+            top_k = self.summary_format_args.get("top_k", top_k)
+            min_p = self.summary_format_args.get("min_p", min_p)
 
-        summary = self.llm_infer(messages=summary_conversation,
-                              temperature=temperature,
-                              tools=None,
-                              max_new_tokens=max_new_tokens,
-                              top_p=top_p, top_k=top_k, min_p=min_p,
-                              model=self.summary_format_model,
-                              model_name=self.summary_format_model_name)
+        summary = self.llm_infer(
+            messages=summary_conversation,
+            temperature=temperature,
+            tools=None,
+            max_new_tokens=max_new_tokens,
+            top_p=top_p,
+            top_k=top_k,
+            min_p=min_p,
+            model=self.summary_format_model,
+            model_name=self.summary_format_model_name,
+        )
 
         if "</think>" in summary:
             summary = summary.split("</think>")[-1].strip()

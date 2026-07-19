@@ -201,7 +201,7 @@ def get_config(request: Request) -> dict:
         "default_models": {
             "gpt": "gpt-5",
             "claude": "claude-opus-4-8",
-            "gemini": "gemini-2.5-pro",
+            "gemini": "gemini-2.5-flash",
         },
         # Whether the browser may supply the API key for this caller, and which
         # backends already have a server-side key (value never exposed).
