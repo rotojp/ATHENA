@@ -654,8 +654,10 @@ class AthenaCore:
                 import anthropic
             except ImportError as exc:
                 raise RuntimeError(
-                    "Backend.CLAUDE needs the `anthropic` package. Install it "
-                    'with `pip install "athena-r1[api]"` or `pip install anthropic`.'
+                    "Backend.CLAUDE needs the `anthropic` package, which is not "
+                    "installed in the interpreter running ATHENA. Install it with "
+                    "`python -m pip install anthropic` (use the SAME python that "
+                    'runs the server), or from the repo `pip install -e ".[api]"`.'
                 ) from exc
             self._claude_client_obj = anthropic.Anthropic()
         return self._claude_client_obj
