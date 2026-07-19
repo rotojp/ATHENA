@@ -28,6 +28,16 @@ PORT=${1:-8000}
 MODEL=${2:-mims-harvard/ATHENA-R1-Qwen3-8B}
 HOST=${MLX_HOST:-127.0.0.1}
 
+# Tolerate `launch_mlx.sh <model>` (model as the first arg, mirroring
+# launch_all.sh). If $1 isn't a numeric port, treat it as the model and keep the
+# default port — otherwise a model id like "mims-harvard/ATHENA-R1-Qwen3-8B"
+# becomes the port, the bind is nonsense, and the log path mlx_<port>.log gains
+# a "/" that breaks the redirect ("No such file or directory").
+if ! printf '%s' "$PORT" | grep -qE '^[0-9]+$'; then
+    MODEL=$PORT
+    PORT=8000
+fi
+
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 VENV=${MLX_VENV:-$REPO/.venv-mlx}
 PY="$VENV/bin/python"
