@@ -33,16 +33,25 @@ for a in "$@"; do
 done
 MODEL=${ARGS[0]:-mims-harvard/ATHENA-R1-Qwen3-8B}
 LOG_DIR=${LOG_DIR:-/tmp}
-PYTHON=${PYTHON:-python}
-
 cd "$(dirname "$0")/.."
 
-# Prefer the repo venv so `vllm`, the web servers, and tooluniverse all resolve
-# to the project's installed interpreter regardless of the caller's active env.
+# Resolve a WORKING python: prefer an explicit $PYTHON, then the repo venv, then
+# python3, then python — validating that each actually runs. A bare `python`
+# often points at a broken pyenv/asdf shim (e.g. after the version manager is
+# removed: "pyenv: No such file or directory"), which silently stops the web
+# servers from launching. Probing with `-c 'import sys'` skips such shims.
 [ -d "$PWD/.venv/bin" ] && PATH="$PWD/.venv/bin:$PATH"
-if [ -x "$PWD/.venv/bin/python" ] && { [ -z "${PYTHON:-}" ] || [ "${PYTHON}" = "python" ]; }; then
-    PYTHON="$PWD/.venv/bin/python"
-fi
+_pick_python() {
+    for cand in "${PYTHON:-}" "$PWD/.venv/bin/python" python3 python; do
+        [ -n "$cand" ] || continue
+        if command -v "$cand" >/dev/null 2>&1 && "$cand" -c 'import sys' >/dev/null 2>&1; then
+            printf '%s' "$cand"; return 0
+        fi
+    done
+    printf 'python3'  # last resort; errors visibly if the environment is broken
+}
+PYTHON="$(_pick_python)"
+echo "Using python: $PYTHON ($("$PYTHON" --version 2>&1))"
 
 # Model-server backend: vLLM has no macOS build, so serve via MLX on Apple
 # Silicon. Override with MODEL_BACKEND=vllm|mlx.
@@ -139,6 +148,18 @@ export AZURE_API_KEY=${AZURE_API_KEY:-dummy}
 export ATHENA_R1_LOG_LEVEL=${ATHENA_R1_LOG_LEVEL:-WARNING}
 export ATHENA_MAX_AGENT_LEVEL=${ATHENA_MAX_AGENT_LEVEL:-1}
 export PYTHONUNBUFFERED=1
+
+# The AG-UI (:8090) and OpenAI-compat (:9000) servers need the web extra
+# (fastapi, uvicorn, ag-ui-protocol). If the resolved interpreter can't import
+# them, provision them (mirrors launch_tooluniverse.sh's embedding install) —
+# non-fatal, so a locked-down env gets a clear pointer instead of a silent
+# ModuleNotFoundError buried in the server log.
+if ! "$PYTHON" -c "import fastapi, uvicorn, ag_ui" >/dev/null 2>&1; then
+    echo "→ Installing web dependencies for the AG-UI/OpenAI servers…"
+    "$PYTHON" -m pip install --quiet --disable-pip-version-check \
+        "fastapi>=0.100" "uvicorn[standard]>=0.20" "ag-ui-protocol>=0.1" \
+        || echo "  ⚠ web-dep install failed — :8090/:9000 may not start; run: pip install -e \".[web]\"" >&2
+fi
 
 # `setsid` is util-linux and absent on macOS; the `nohup … &` + `disown` below
 # already detach the web servers, so use setsid only where it exists.
