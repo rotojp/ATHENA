@@ -116,7 +116,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--backend-model",
         default=None,
-        help="Model id for the chosen backend (e.g. claude-opus-4-8, gemini-2.5-pro)",
+        help="Model id for the chosen backend (e.g. claude-opus-4-8, gemini-2.5-flash)",
     )
     parser.add_argument("-h", "--help", action="store_true")
     parser.add_argument("-V", "--version", action="store_true")

@@ -189,7 +189,8 @@ class AthenaR1:
                 the LLM without code edits, e.g. ``"claude-opus-4-8"``,
                 ``"claude-sonnet-5"``, or ``"gemini-2.5-pro"``. Defaults per
                 backend (GPT: ``gpt-5``, Claude: ``claude-opus-4-8``, Gemini:
-                ``gemini-2.5-pro``). Ignored for ``ATHENA`` (uses ``model``).
+                ``gemini-2.5-flash`` — Pro is not on Google's free tier).
+                Ignored for ``ATHENA`` (uses ``model``).
             azure_endpoint: Azure OpenAI endpoint URL. Required if `backend=GPT`
                 or if you intend to use `map_to_option(backend="gpt")`.
             azure_api_key: Azure OpenAI API key. Falls back to environment
